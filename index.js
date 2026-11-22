@@ -33,7 +33,12 @@ if (!rawIp || rawIp === 'YOUR_SERVER_IP_HERE') {
   process.exit(1);
 }
 const { host, port } = parseAddress(rawIp);
-const version = process.env.MC_VERSION || config.version || false; // false = auto-detect
+const firstVersion = process.env.MC_VERSION || config.version || false; // false = auto-detect
+// If the bot keeps getting kicked right after joining, it tries these versions one by one
+const FALLBACK_VERSIONS = ['1.21.4', '1.21.1', '1.20.6', '1.20.4', '1.20.1', '1.19.4', '1.18.2', '1.16.5'];
+const versionList = [firstVersion, ...FALLBACK_VERSIONS.filter((v) => v !== firstVersion)];
+let versionIdx = 0;
+let quickFails = 0;
 
 // ---------- helpers ----------
 function isHostile(entity) {
@@ -49,7 +54,8 @@ function isHostile(entity) {
 
 // ---------- bot ----------
 function startBot() {
-  console.log(`[bot] Connecting ${BOT_NAME} to ${host}:${port} ...`);
+  const version = versionList[versionIdx];
+  console.log(`[bot] Connecting ${BOT_NAME} to ${host}:${port} (version: ${version || 'auto'}) ...`);
 
   const bot = mineflayer.createBot({
     host,
@@ -59,8 +65,13 @@ function startBot() {
     hideErrors: true,
   });
 
-  bot.loadPlugin(pathfinder);
+  // Don't send movement packets until fully loaded in (avoids "Invalid move player packet" kicks)
+  bot.physicsEnabled = false;
 
+  bot.loadPlugin(pathfinder);
+  bot.once('login', () => console.log('[bot] Logged in using protocol version:', bot.version));
+
+  let spawnedAt = 0;
   let chatTimer = null;
   let tickTimer = null;
   let wanderTimer = null;
@@ -86,7 +97,9 @@ function startBot() {
   });
 
   bot.once('spawn', () => {
+    spawnedAt = Date.now();
     console.log(`[bot] Joined ${host}:${port}`);
+    setTimeout(() => { bot.physicsEnabled = true; }, 2500);
 
     const movements = new Movements(bot);
     movements.canDig = false; // don't break blocks
@@ -188,6 +201,17 @@ function startBot() {
     clearInterval(chatTimer);
     clearInterval(tickTimer);
     clearInterval(wanderTimer);
+    // Kicked within 10 seconds of joining = probably wrong version, so rotate after 3 fails
+    if (spawnedAt && Date.now() - spawnedAt < 10000) {
+      quickFails++;
+    } else if (spawnedAt) {
+      quickFails = 0;
+    }
+    if (quickFails >= 3) {
+      quickFails = 0;
+      versionIdx = (versionIdx + 1) % versionList.length;
+      console.log(`[bot] Kicked too fast 3 times, switching to version ${versionList[versionIdx] || 'auto'}`);
+    }
     console.log(`[bot] Disconnected. Rejoining in ${REJOIN_DELAY_MS / 1000} seconds...`);
     setTimeout(startBot, REJOIN_DELAY_MS);
   });
