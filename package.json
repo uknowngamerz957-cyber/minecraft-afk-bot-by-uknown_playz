@@ -1,6 +1,6 @@
 {
   "name": "random-gameer-bot",
-  "version": "2.0.0",
+  "version": "26.1.2",
   "description": "Minecraft AFK bot RANDOM_GAMEER - auto joins the server in config.json",
   "main": "index.js",
   "scripts": {
