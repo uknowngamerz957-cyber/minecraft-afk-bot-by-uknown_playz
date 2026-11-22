@@ -33,9 +33,11 @@ if (!rawIp || rawIp === 'YOUR_SERVER_IP_HERE') {
   process.exit(1);
 }
 const { host, port } = parseAddress(rawIp);
-const firstVersion = process.env.MC_VERSION || config.version || false; // false = auto-detect
-// If the bot keeps getting kicked right after joining, it tries these versions one by one
-const FALLBACK_VERSIONS = ['1.21.4', '1.21.1', '1.20.6', '1.20.4', '1.20.1', '1.19.4', '1.18.2', '1.16.5'];
+// mineflayer only supports Minecraft up to 1.21.11. Newer servers (26.x) still accept it through
+// ViaVersion, so the bot joins as 1.21.11 by default. Auto-detect ("") can fail on 26.x servers.
+const firstVersion = process.env.MC_VERSION || config.version || '1.21.11';
+// If the bot keeps failing to join, it tries these versions one by one
+const FALLBACK_VERSIONS = ['1.21.11', '1.21.9', '1.21.4', '1.21.1', '1.20.4', '1.19.4', '1.18.2'];
 const versionList = [firstVersion, ...FALLBACK_VERSIONS.filter((v) => v !== firstVersion)];
 let versionIdx = 0;
 let quickFails = 0;
@@ -57,13 +59,23 @@ function startBot() {
   const version = versionList[versionIdx];
   console.log(`[bot] Connecting ${BOT_NAME} to ${host}:${port} (version: ${version || 'auto'}) ...`);
 
-  const bot = mineflayer.createBot({
-    host,
-    port,
-    username: BOT_NAME,
-    version,
-    hideErrors: false,
-  });
+  let bot;
+  try {
+    bot = mineflayer.createBot({
+      host,
+      port,
+      username: BOT_NAME,
+      version,
+      hideErrors: false,
+    });
+  } catch (err) {
+    // e.g. unsupported version in config.json: don't die silently, try the next version
+    console.log(`[bot] Could not start with version ${version || 'auto'}: ${err.message}`);
+    quickFails = 0;
+    versionIdx = (versionIdx + 1) % versionList.length;
+    setTimeout(startBot, REJOIN_DELAY_MS);
+    return;
+  }
 
   bot.loadPlugin(pathfinder);
   bot.once('login', () => console.log('[bot] Logged in using protocol version:', bot.version));
@@ -206,10 +218,11 @@ function startBot() {
     clearInterval(chatTimer);
     clearInterval(tickTimer);
     clearInterval(wanderTimer);
-    // Kicked within 10 seconds of joining = probably wrong version, so rotate after 3 fails
-    if (spawnedAt && Date.now() - spawnedAt < 10000) {
+    // Never joined, or kicked within 10 seconds of joining = probably wrong version.
+    // After 3 fails in a row, switch to the next version in the list.
+    if (!spawnedAt || Date.now() - spawnedAt < 10000) {
       quickFails++;
-    } else if (spawnedAt) {
+    } else {
       quickFails = 0;
     }
     if (quickFails >= 3) {
@@ -224,5 +237,8 @@ function startBot() {
 
 process.on('uncaughtException', (err) => console.log('[bot] Uncaught:', err && err.stack));
 process.on('unhandledRejection', (err) => console.log('[bot] Unhandled:', err && err.message));
+
+// keeps the program alive no matter what, so the run never ends by itself
+setInterval(() => {}, 60 * 1000);
 
 startBot();
