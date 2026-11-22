@@ -65,11 +65,9 @@ function startBot() {
     hideErrors: true,
   });
 
-  // Don't send movement packets until fully loaded in (avoids "Invalid move player packet" kicks)
-  bot.physicsEnabled = false;
-
   bot.loadPlugin(pathfinder);
   bot.once('login', () => console.log('[bot] Logged in using protocol version:', bot.version));
+  bot.on('connect', () => console.log('[bot] TCP connected to server'));
 
   let spawnedAt = 0;
   let chatTimer = null;
@@ -99,7 +97,6 @@ function startBot() {
   bot.once('spawn', () => {
     spawnedAt = Date.now();
     console.log(`[bot] Joined ${host}:${port}`);
-    setTimeout(() => { bot.physicsEnabled = true; }, 2500);
 
     const movements = new Movements(bot);
     movements.canDig = false; // don't break blocks
