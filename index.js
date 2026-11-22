@@ -62,12 +62,13 @@ function startBot() {
     port,
     username: BOT_NAME,
     version,
-    hideErrors: true,
+    hideErrors: false,
   });
 
   bot.loadPlugin(pathfinder);
   bot.once('login', () => console.log('[bot] Logged in using protocol version:', bot.version));
   bot.on('connect', () => console.log('[bot] TCP connected to server'));
+  bot._client.on('error', (err) => console.log('[bot] Protocol error:', err.message));
 
   let spawnedAt = 0;
   let chatTimer = null;
@@ -97,6 +98,13 @@ function startBot() {
   bot.once('spawn', () => {
     spawnedAt = Date.now();
     console.log(`[bot] Joined ${host}:${port}`);
+
+    // heartbeat so the log shows the bot is alive and what it is doing
+    const heartbeat = setInterval(() => {
+      const p = bot.entity && bot.entity.position;
+      console.log(`[bot] alive | health=${bot.health} | state=${state} | pos=${p ? p.x.toFixed(1) + ',' + p.y.toFixed(1) + ',' + p.z.toFixed(1) : '?'}`);
+    }, 15000);
+    bot.once('end', () => clearInterval(heartbeat));
 
     const movements = new Movements(bot);
     movements.canDig = false; // don't break blocks
@@ -214,7 +222,7 @@ function startBot() {
   });
 }
 
-process.on('uncaughtException', (err) => console.log('[bot] Uncaught:', err.message));
+process.on('uncaughtException', (err) => console.log('[bot] Uncaught:', err && err.stack));
 process.on('unhandledRejection', (err) => console.log('[bot] Unhandled:', err && err.message));
 
 startBot();
