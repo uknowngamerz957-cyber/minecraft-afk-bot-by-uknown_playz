@@ -1,8 +1,6 @@
-// skills.js - 3x fast mining, crafting, smelting, hunting & unstuck
 const { goals } = require('mineflayer-pathfinder');
 const { Vec3 } = require('vec3');
 const gear = require('./gear');
-
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const BUILD_BLOCKS = ['cobblestone', 'cobbled_deepslate', 'blackstone', 'andesite', 'diorite', 'granite', 'dirt', 'netherrack'];
 const TIERS = { wooden: 1, golden: 1, stone: 2, iron: 3, diamond: 4, netherite: 5 };
@@ -19,7 +17,6 @@ const COST = {
   furnace: { cobble: 8 },
 };
 const LIQUIDS = ['water', 'lava'];
-
 const check = (ctx) => { if (ctx.state.stopped) throw new Error('STOPPED'); };
 const hasBad = (st, k) => !!(st && st.badBlocks && st.badBlocks.has(k));
 const markBad = (st, k) => { if (st && st.badBlocks) st.badBlocks.add(k); };
@@ -44,24 +41,17 @@ function hasArmorPiece(bot, piece, minTier = 3) {
   return gear.equippedNames(bot).some(ok) || bot.inventory.items().some((i) => ok(i.name));
 }
 
-async function humanLookAt(bot, v) {
-  if (!bot || !bot.entity || !v) return;
-  try { await bot.lookAt(v, false); } catch (_) {}
-}
+async function humanLookAt(bot, v) { if (bot && bot.entity && v) { try { await bot.lookAt(v, false); } catch (_) {} } }
 
 async function cleanInventoryIfNeeded(ctx) {
   const items = ctx.bot.inventory.items();
   if (items.length < 32) return;
-  for (const it of items) {
-    if (JUNK.has(it.name)) { try { await ctx.bot.tossStack(it); await sleep(15); } catch (_) {} }
-  }
+  for (const it of items) { if (JUNK.has(it.name)) { try { await ctx.bot.tossStack(it); await sleep(15); } catch (_) {} } }
 }
 
 async function waitNoCombat(ctx, maxMs = 15000) {
   const t0 = Date.now();
-  while ((ctx.state.combat || ctx.state.rescue || gear.isEating()) && Date.now() - t0 < maxMs) {
-    check(ctx); await sleep(50);
-  }
+  while ((ctx.state.combat || ctx.state.rescue || gear.isEating()) && Date.now() - t0 < maxMs) { check(ctx); await sleep(50); }
 }
 
 async function gotoGoal(ctx, goal, timeout = 6000) {
@@ -82,8 +72,7 @@ async function gotoGoal(ctx, goal, timeout = 6000) {
 }
 
 async function explore(ctx, dist = 24) {
-  const p = ctx.bot.entity.position;
-  const a = Math.random() * Math.PI * 2;
+  const p = ctx.bot.entity.position, a = Math.random() * Math.PI * 2;
   return gotoGoal(ctx, new goals.GoalXZ(p.x + Math.cos(a) * dist, p.z + Math.sin(a) * dist), 6000);
 }
 
@@ -91,9 +80,7 @@ async function pickupDrops(ctx, radius = 9) {
   const { bot } = ctx;
   for (let i = 0; i < 3; i++) {
     const me = bot.entity.position;
-    const items = Object.values(bot.entities)
-      .filter((e) => e && e.position && (e.name === 'item' || e.displayName === 'Item') && e.position.distanceTo(me) < radius)
-      .sort((a, b) => a.position.distanceTo(me) - b.position.distanceTo(me));
+    const items = Object.values(bot.entities).filter((e) => e && e.position && (e.name === 'item' || e.displayName === 'Item') && e.position.distanceTo(me) < radius).sort((a, b) => a.position.distanceTo(me) - b.position.distanceTo(me));
     if (!items.length) return;
     await gotoGoal(ctx, new goals.GoalNear(items[0].position.x, items[0].position.y, items[0].position.z, 1.0), 2500);
     await sleep(20);
@@ -108,33 +95,38 @@ async function equipBestToolFor(bot, block) {
   }
   let handT = Infinity;
   try { handT = block.digTime(null, false, false, false, [], bot.entity.effects); } catch (_) {}
-  if (best && bestT < handT && (!bot.heldItem || bot.heldItem.name !== best.name)) {
-    try { await bot.equip(best, 'hand'); } catch (_) {}
-  }
+  if (best && bestT < handT && (!bot.heldItem || bot.heldItem.name !== best.name)) { try { await bot.equip(best, 'hand'); } catch (_) {} }
 }
 
 async function mineBlock(ctx, block, opts = {}) {
   const { bot, state } = ctx;
-  const p = block.position, key = p.toString();
-  const eye = bot.entity.position.offset(0, bot.entity.height || 1.62, 0);
+  const p = block.position, key = p.toString(), eye = bot.entity.position.offset(0, bot.entity.height || 1.62, 0);
   let ok = true;
-  if (eye.distanceTo(p.offset(0.5, 0.5, 0.5)) > 4.8) {
-    ctx.movements.canDig = opts.canDig !== false;
-    ok = await gotoGoal(ctx, new goals.GoalNear(p.x, p.y, p.z, 3.2), 5500);
-    ctx.movements.canDig = false;
-  }
+  if (eye.distanceTo(p.offset(0.5, 0.5, 0.5)) > 4.8) { ctx.movements.canDig = opts.canDig !== false; ok = await gotoGoal(ctx, new goals.GoalNear(p.x, p.y, p.z, 3.2), 5500); ctx.movements.canDig = false; }
   const target = bot.blockAt(p);
   if (!target || target.type !== block.type) return true;
-  if (!ok && bot.entity.position.offset(0, bot.entity.height || 1.62, 0).distanceTo(p.offset(0.5, 0.5, 0.5)) > 5.6) {
-    markBad(state, key); return false;
-  }
+  if (!ok && bot.entity.position.offset(0, bot.entity.height || 1.62, 0).distanceTo(p.offset(0.5, 0.5, 0.5)) > 5.6) { markBad(state, key); return false; }
   await equipBestToolFor(bot, target);
   if (!target.canHarvest(bot.heldItem ? bot.heldItem.type : null)) { markBad(state, key); return false; }
-  try { state.digging = true; await bot.dig(target, true); return true; }
-  catch (_) { markBad(state, key); return false; }
-  finally { state.digging = false; }
+  try { state.digging = true; await bot.dig(target, true); return true; } catch (_) { markBad(state, key); return false; } finally { state.digging = false; }
 }
 
 async function collect(ctx, names, want, haveFn, opts = {}) {
   const { bot, state, log } = ctx;
-  const ids = names.map((n) => bot.registry.blocksByName[n]).filter
+  const ids = names.map((n) => bot.registry.blocksByName[n]).filter(Boolean).map((b) => b.id);
+  if (!ids.length) { log(`unknown blocks: ${names.join(',')}`); return false; }
+  let fails = 0, explores = 0, dug = 0;
+  while (haveFn() < want) {
+    check(ctx);
+    if (fails >= 6 || explores >= 4) { await pickupDrops(ctx, 9); await cleanInventoryIfNeeded(ctx); return haveFn() >= want; }
+    await waitNoCombat(ctx);
+    const me = bot.entity.position;
+    const found = bot.findBlocks({ matching: ids, maxDistance: opts.maxDistance || 48, count: 80 }).filter((pos) => !hasBad(state, pos.toString())).filter((pos) => opts.maxAbove === undefined || pos.y - me.y <= opts.maxAbove).sort((a, b) => a.distanceTo(me) - b.distanceTo(me));
+    if (!found.length) { await pickupDrops(ctx, 9); explores++; await explore(ctx, 24); continue; }
+    const block = bot.blockAt(found[0]);
+    if (!block) { markBad(state, found[0].toString()); continue; }
+    if (await mineBlock(ctx, block, opts)) { fails = 0; dug++; if (dug >= 12 || haveFn() >= want) { dug = 0; await pickupDrops(ctx, 9); await cleanInventoryIfNeeded(ctx); } } else fails++;
+  }
+  await pickupDrops(ctx, 9); await cleanInventoryIfNeeded(ctx);
+  return true;
+}
