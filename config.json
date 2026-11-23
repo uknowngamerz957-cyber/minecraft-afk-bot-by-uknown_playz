@@ -4,5 +4,8 @@
   "botName": "RANDOM_GAMEER",
   "password": "uknown_playz",
   "chatMessage": "67",
-  "chatEveryMinutes": 5
+  "chatEveryMinutes": 5,
+  "smartMode": true,
+  "jumpWhileMoving": true,
+  "hitsToFight": 2
 }
