@@ -1,5 +1,4 @@
-// RANDOM_GAMEER - Minecraft AFK bot (no Discord needed)
-// Reads the server IP from config.json (or SERVER_IP env var) and joins automatically.
+// RANDOM_GAMEER - Minecraft AFK & survival progression bot
 
 const fs = require('fs');
 const path = require('path');
@@ -7,17 +6,16 @@ const mineflayer = require('mineflayer');
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
 const { startBrain } = require('./brain');
 
-// ---------- settings ----------
 const config = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8'));
 
 const BOT_NAME = config.botName || 'RANDOM_GAMEER';
 const PASSWORD = config.password || 'uknown_playz';
 const CHAT_MESSAGE = config.chatMessage || '67';
 const CHAT_INTERVAL_MS = (config.chatEveryMinutes || 5) * 60 * 1000;
-const ATTACK_RANGE = 10; // kill mobs within this many blocks
-const FLEE_HEALTH = 8; // run away when health <= this (20 = full)
-const CREEPER_FLEE_DIST = 7; // always run from creepers this close
-const REJOIN_DELAY_MS = 2000; // rejoin 2 sec after kick/disconnect
+const ATTACK_RANGE = 10;
+const FLEE_HEALTH = 8;
+const CREEPER_FLEE_DIST = 7;
+const REJOIN_DELAY_MS = 2000;
 
 function parseAddress(input) {
   const trimmed = String(input).trim();
@@ -34,16 +32,13 @@ if (!rawIp || rawIp === 'YOUR_SERVER_IP_HERE') {
   process.exit(1);
 }
 const { host, port } = parseAddress(rawIp);
-// mineflayer only supports Minecraft up to 1.21.11. Newer servers (26.x) still accept it through
-// ViaVersion, so the bot joins as 1.21.11 by default. Auto-detect ("") can fail on 26.x servers.
+
 const firstVersion = process.env.MC_VERSION || config.version || '1.21.11';
-// If the bot keeps failing to join, it tries these versions one by one
 const FALLBACK_VERSIONS = ['1.21.11', '1.21.9', '1.21.4', '1.21.1', '1.20.4', '1.19.4', '1.18.2'];
 const versionList = [firstVersion, ...FALLBACK_VERSIONS.filter((v) => v !== firstVersion)];
 let versionIdx = 0;
 let quickFails = 0;
 
-// ---------- helpers ----------
 function isHostile(entity) {
   if (!entity || !entity.position) return false;
   if (entity.type === 'hostile') return true;
@@ -55,7 +50,6 @@ function isHostile(entity) {
   return hostileNames.includes(entity.name);
 }
 
-// ---------- bot ----------
 function startBot() {
   const version = versionList[versionIdx];
   console.log(`[bot] Connecting ${BOT_NAME} to ${host}:${port} (version: ${version || 'auto'}) ...`);
@@ -70,7 +64,6 @@ function startBot() {
       hideErrors: false,
     });
   } catch (err) {
-    // e.g. unsupported version in config.json: don't die silently, try the next version
     console.log(`[bot] Could not start with version ${version || 'auto'}: ${err.message}`);
     quickFails = 0;
     versionIdx = (versionIdx + 1) % versionList.length;
@@ -90,9 +83,8 @@ function startBot() {
   let wanderTimer = null;
   let lastAttack = 0;
   let lastAuthAt = 0;
-  let state = 'idle'; // idle | fighting | fleeing
+  let state = 'idle';
 
-  // Auto /register and /login for auth plugins (AuthMe, nLogin, ...)
   bot.on('messagestr', (msg) => {
     const text = msg.toLowerCase();
     if (Date.now() - lastAuthAt < 2000) return;
@@ -113,28 +105,24 @@ function startBot() {
     spawnedAt = Date.now();
     console.log(`[bot] Joined ${host}:${port}`);
 
-    // heartbeat so the log shows the bot is alive and what it is doing
     const heartbeat = setInterval(() => {
       const p = bot.entity && bot.entity.position;
       console.log(`[bot] alive | health=${bot.health} | state=${state} | pos=${p ? p.x.toFixed(1) + ',' + p.y.toFixed(1) + ',' + p.z.toFixed(1) : '?'}`);
     }, 15000);
     bot.once('end', () => clearInterval(heartbeat));
 
-    // say "67" every 5 minutes
     setTimeout(() => { try { bot.chat(CHAT_MESSAGE); } catch (_) {} }, 5000);
     chatTimer = setInterval(() => {
       try { bot.chat(CHAT_MESSAGE); } catch (_) {}
     }, CHAT_INTERVAL_MS);
 
     if (config.smartMode === false) {
-      // old simple mode: just wander and fight mobs
       const movements = new Movements(bot);
       movements.canDig = false;
       bot.pathfinder.setMovements(movements);
       tickTimer = setInterval(tick, 400);
       wanderTimer = setInterval(wander, 6000);
     } else {
-      // smart mode: gathers, crafts, builds, gears up, fights back
       try {
         brain = startBrain(bot, config, (m) => console.log('[brain]', m));
       } catch (e) {
@@ -187,7 +175,7 @@ function startBot() {
     const dist = bot.entity.position.distanceTo(mob.position);
     if (dist < 3.5 && Date.now() - lastAttack > 650) {
       lastAttack = Date.now();
-      bot.lookAt(mob.position.offset(0, (mob.height || 1) * 0.8, 0), true)
+      bot.lookAt(mob.position.offset(0, (mob.height || 1) * 0.8, 0), false)
         .then(() => { try { bot.attack(mob); } catch (_) {} })
         .catch(() => {});
     }
@@ -198,7 +186,7 @@ function startBot() {
     const lowHealth = bot.health !== undefined && bot.health <= FLEE_HEALTH;
 
     const close = nearestHostile(CREEPER_FLEE_DIST);
-    if (close && close.name === 'creeper') return flee(close); // never melee creepers
+    if (close && close.name === 'creeper') return flee(close);
 
     const mob = nearestHostile(ATTACK_RANGE);
     if (mob && lowHealth) return flee(mob);
@@ -218,8 +206,8 @@ function startBot() {
       new goals.GoalNear(p.x + (Math.random() * 20 - 10), p.y, p.z + (Math.random() * 20 - 10), 1)
     );
     bot.setControlState('jump', true);
-    setTimeout(() => bot.setControlState('jump', false), 300);
-    bot.look(Math.random() * Math.PI * 2, (Math.random() - 0.5) * 0.6, false);
+    setTimeout(() => { try { bot.setControlState('jump', false); } catch (_) {} }, 250);
+    bot.look(Math.random() * Math.PI * 2, (Math.random() - 0.5) * 0.6, false).catch(() => {});
   }
 
   bot.on('death', () => console.log('[bot] Died, respawning...'));
@@ -230,8 +218,6 @@ function startBot() {
     clearInterval(chatTimer);
     clearInterval(tickTimer);
     clearInterval(wanderTimer);
-    // Never joined, or kicked within 10 seconds of joining = probably wrong version.
-    // After 3 fails in a row, switch to the next version in the list.
     if (!spawnedAt || Date.now() - spawnedAt < 10000) {
       quickFails++;
     } else {
@@ -250,7 +236,6 @@ function startBot() {
 process.on('uncaughtException', (err) => console.log('[bot] Uncaught:', err && err.stack));
 process.on('unhandledRejection', (err) => console.log('[bot] Unhandled:', err && err.message));
 
-// keeps the program alive no matter what, so the run never ends by itself
 setInterval(() => {}, 60 * 1000);
 
 startBot();
