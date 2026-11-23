@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const mineflayer = require('mineflayer');
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
+const { startBrain } = require('./brain');
 
 // ---------- settings ----------
 const config = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8'));
@@ -83,6 +84,7 @@ function startBot() {
   bot._client.on('error', (err) => console.log('[bot] Protocol error:', err.message));
 
   let spawnedAt = 0;
+  let brain = null;
   let chatTimer = null;
   let tickTimer = null;
   let wanderTimer = null;
@@ -118,18 +120,27 @@ function startBot() {
     }, 15000);
     bot.once('end', () => clearInterval(heartbeat));
 
-    const movements = new Movements(bot);
-    movements.canDig = false; // don't break blocks
-    bot.pathfinder.setMovements(movements);
-
     // say "67" every 5 minutes
     setTimeout(() => { try { bot.chat(CHAT_MESSAGE); } catch (_) {} }, 5000);
     chatTimer = setInterval(() => {
       try { bot.chat(CHAT_MESSAGE); } catch (_) {}
     }, CHAT_INTERVAL_MS);
 
-    tickTimer = setInterval(tick, 400);
-    wanderTimer = setInterval(wander, 6000);
+    if (config.smartMode === false) {
+      // old simple mode: just wander and fight mobs
+      const movements = new Movements(bot);
+      movements.canDig = false;
+      bot.pathfinder.setMovements(movements);
+      tickTimer = setInterval(tick, 400);
+      wanderTimer = setInterval(wander, 6000);
+    } else {
+      // smart mode: gathers, crafts, builds, gears up, fights back
+      try {
+        brain = startBrain(bot, config, (m) => console.log('[brain]', m));
+      } catch (e) {
+        console.log('[bot] Brain failed to start:', e && e.stack);
+      }
+    }
   });
 
   function nearestHostile(maxDist) {
@@ -215,6 +226,7 @@ function startBot() {
   bot.on('kicked', (reason) => console.log('[bot] Kicked:', String(reason).slice(0, 300)));
   bot.on('error', (err) => console.log('[bot] Error:', err.message));
   bot.on('end', () => {
+    if (brain) brain.stop();
     clearInterval(chatTimer);
     clearInterval(tickTimer);
     clearInterval(wanderTimer);
