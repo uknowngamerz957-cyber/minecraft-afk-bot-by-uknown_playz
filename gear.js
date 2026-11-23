@@ -1,6 +1,5 @@
-// gear.js - weapons, armor and eating helpers
+// gear.js - weapons, armor, food, and gear tier helpers
 
-// damage / attack cooldown (ms) of every weapon the bot can use
 const WEAPONS = {
   netherite_sword: { damage: 8, cooldown: 625 },
   diamond_sword: { damage: 7, cooldown: 625 },
@@ -19,20 +18,18 @@ const WEAPONS = {
 const ARMOR_TIERS = { netherite: 6, diamond: 5, iron: 4, chainmail: 3, golden: 2, leather: 1 };
 const ARMOR_SLOTS = { head: 'helmet', torso: 'chestplate', legs: 'leggings', feet: 'boots' };
 
-// foods that hurt more than they help
 const BAD_FOOD = new Set([
   'rotten_flesh', 'spider_eye', 'pufferfish', 'poisonous_potato', 'suspicious_stew',
   'chorus_fruit', 'golden_apple', 'enchanted_golden_apple', 'chicken', 'tropical_fish',
 ]);
 
-// ---------- weapons ----------
 function bestWeapon(bot) {
   let best = null;
   let bestScore = 0;
   for (const item of bot.inventory.items()) {
     const w = WEAPONS[item.name];
     if (!w) continue;
-    const score = w.damage / (w.cooldown / 1000); // damage per second
+    const score = w.damage / (w.cooldown / 1000);
     if (score > bestScore) {
       best = item;
       bestScore = score;
@@ -54,7 +51,6 @@ function weaponCooldown(bot) {
   return held && WEAPONS[held.name] ? WEAPONS[held.name].cooldown : 500;
 }
 
-// ---------- armor ----------
 function tierOf(name, piece) {
   if (!name || !name.endsWith('_' + piece)) return 0;
   return ARMOR_TIERS[name.slice(0, -(piece.length + 1))] || 0;
@@ -86,12 +82,19 @@ async function equipBestArmor(bot) {
   }
 }
 
-// true only when all 4 pieces are iron or better
-function hasIronArmor(bot) {
+function hasTierArmor(bot, minTier) {
   return Object.entries(ARMOR_SLOTS).every(([slot, piece]) => {
     const cur = equippedIn(bot, slot);
-    return cur && tierOf(cur.name, piece) >= ARMOR_TIERS.iron;
+    return cur && tierOf(cur.name, piece) >= minTier;
   });
+}
+
+function hasIronArmor(bot) {
+  return hasTierArmor(bot, ARMOR_TIERS.iron);
+}
+
+function hasDiamondArmor(bot) {
+  return hasTierArmor(bot, ARMOR_TIERS.diamond);
 }
 
 function equippedNames(bot) {
@@ -101,7 +104,6 @@ function equippedNames(bot) {
     .map((i) => i.name);
 }
 
-// ---------- food ----------
 function foodPoints(bot, name) {
   const f = bot.registry.foodsByName && bot.registry.foodsByName[name];
   return f ? f.foodPoints : 0;
@@ -132,13 +134,13 @@ function foodCount(bot) {
 let eating = false;
 async function eatIfNeeded(bot) {
   if (eating || bot.food === undefined) return false;
-  const hungry = bot.food <= 14 || (bot.health < 14 && bot.food < 20);
+  const hungry = bot.food <= 16 || (bot.health <= 15 && bot.food < 20);
   if (!hungry) return false;
   const food = bestFood(bot);
   if (!food) return false;
   eating = true;
   try {
-    if (bot.usingHeldItem) { try { bot.deactivateItem(); } catch (_) {} } // lower the shield first
+    if (bot.usingHeldItem) { try { bot.deactivateItem(); } catch (_) {} }
     await bot.equip(food, 'hand');
     await bot.consume();
     return true;
@@ -156,6 +158,7 @@ module.exports = {
   weaponCooldown,
   equipBestArmor,
   hasIronArmor,
+  hasDiamondArmor,
   equippedNames,
   foodCount,
   eatIfNeeded,
