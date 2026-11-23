@@ -1,4 +1,4 @@
-// brain.js - full progression brain with climb/unstick & mining fixes
+// brain.js - fast progression brain: wood -> stone -> food -> house -> iron -> diamond -> enchant
 
 const { Movements, goals } = require('mineflayer-pathfinder');
 const { Vec3 } = require('vec3');
@@ -15,12 +15,13 @@ const LOG_NAMES = [
 const IRON_ORES = ['iron_ore', 'deepslate_iron_ore'];
 const DIAMOND_ORES = ['diamond_ore', 'deepslate_diamond_ore'];
 const COAL_ORES = ['coal_ore', 'deepslate_coal_ore'];
+const SCAFFOLD_NAMES = ['dirt', 'cobblestone', 'cobbled_deepslate', 'netherrack', 'andesite', 'diorite', 'granite'];
 const HOSTILE_NAMES = [
   'zombie', 'skeleton', 'creeper', 'spider', 'cave_spider', 'witch', 'enderman', 'husk', 'stray', 'drowned',
   'phantom', 'pillager', 'vindicator', 'slime', 'blaze', 'ghast', 'zombie_villager', 'silverfish', 'bogged', 'breeze',
 ];
 
-function createExpiringBadBlocks(ttlMs = 45000) {
+function createExpiringBadBlocks(ttlMs = 25000) {
   const map = new Map();
   return {
     has(k) {
@@ -48,14 +49,18 @@ function startBrain(bot, cfg, log) {
   const movements = new Movements(bot);
   movements.canDig = true;
   movements.allow1by1towers = true;
+  movements.scafoldingBlocks = SCAFFOLD_NAMES
+    .map((n) => bot.registry.itemsByName[n])
+    .filter(Boolean)
+    .map((i) => i.id);
   bot.pathfinder.setMovements(movements);
-  bot.pathfinder.thinkTimeout = 4500;
+  bot.pathfinder.thinkTimeout = 3000;
 
   const state = {
     combat: false,
     digging: false,
     stopped: false,
-    badBlocks: createExpiringBadBlocks(45000),
+    badBlocks: createExpiringBadBlocks(25000),
     home: null,
     houseBuilt: false,
     enchantedDone: false,
@@ -129,14 +134,14 @@ function startBrain(bot, cfg, log) {
     lastHealth = bot.health;
   });
 
-  async function humanLookAt(targetVec) {
+  function aimSmooth(targetVec) {
     if (!bot || !bot.entity || !targetVec) return;
     const jittered = targetVec.offset(
-      (Math.random() - 0.5) * 0.14,
-      (Math.random() - 0.5) * 0.12,
-      (Math.random() - 0.5) * 0.14
+      (Math.random() - 0.5) * 0.1,
+      (Math.random() - 0.5) * 0.08,
+      (Math.random() - 0.5) * 0.1
     );
-    try { await bot.lookAt(jittered, false); } catch (_) {}
+    bot.lookAt(jittered, false).catch(() => {});
   }
 
   function hasShield() {
@@ -171,7 +176,7 @@ function startBrain(bot, cfg, log) {
     shieldDown();
     const now = Date.now();
     const moving = typeof bot.pathfinder.isMoving === 'function' ? bot.pathfinder.isMoving() : true;
-    if (followId !== 'flee:' + from.id || (!moving && now - lastFleeSet > 1500)) {
+    if (followId !== 'flee:' + from.id || (!moving && now - lastFleeSet > 1200)) {
       if (followId !== 'flee:' + from.id) stopMelee();
       followId = 'flee:' + from.id;
       lastFleeSet = now;
@@ -180,7 +185,7 @@ function startBrain(bot, cfg, log) {
       const dx = p.x - from.position.x;
       const dz = p.z - from.position.z;
       const len = Math.hypot(dx, dz) || 1;
-      bot.pathfinder.setGoal(new goals.GoalXZ(p.x + (dx / len) * 25, p.z + (dz / len) * 25));
+      bot.pathfinder.setGoal(new goals.GoalXZ(p.x + (dx / len) * 22, p.z + (dz / len) * 22));
     }
   }
 
@@ -209,21 +214,21 @@ function startBrain(bot, cfg, log) {
       bot.pathfinder.setGoal(null);
       followId = 'melee:' + target.id;
     }
-    humanLookAt(target.position.offset(0, (target.height || 1.6) * 0.85, 0));
+    aimSmooth(target.position.offset(0, (target.height || 1.6) * 0.85, 0));
     bot.setControlState('forward', dist > 2.3);
     bot.setControlState('sprint', dist > 2.3);
     bot.setControlState('back', dist < 1.3);
     if (now > strafeUntil) {
       strafeDir = Math.random() < 0.5 ? -1 : 1;
-      strafeUntil = now + 500 + Math.random() * 700;
+      strafeUntil = now + 450 + Math.random() * 600;
     }
     bot.setControlState('left', strafeDir < 0 && dist < 3.5);
     bot.setControlState('right', strafeDir > 0 && dist < 3.5);
     if (bot.entity.onGround && Math.random() < 0.1) {
       bot.setControlState('jump', true);
-      setTimeout(() => { try { bot.setControlState('jump', false); } catch (_) {} }, 130);
+      setTimeout(() => { try { bot.setControlState('jump', false); } catch (_) {} }, 120);
     }
-    if (dist < 3.3 && now - lastAttack > gear.weaponCooldown(bot) + 30) {
+    if (dist < 3.3 && now - lastAttack > gear.weaponCooldown(bot) + 25) {
       lastAttack = now;
       try { bot.attack(target); } catch (_) {}
     }
@@ -257,8 +262,8 @@ function startBrain(bot, cfg, log) {
     if (mob) {
       if (lowHealth) return flee(mob);
       if (!fightStart.has(mob.id)) fightStart.set(mob.id, now);
-      if (now - fightStart.get(mob.id) > 20000) {
-        ignore.set(mob.id, now + 40000);
+      if (now - fightStart.get(mob.id) > 18000) {
+        ignore.set(mob.id, now + 30000);
         fightStart.delete(mob.id);
         return;
       }
@@ -275,45 +280,74 @@ function startBrain(bot, cfg, log) {
     }
   }
 
-  // Dig a safe block above or in front so the bot can climb out of pits/overhangs
-  async function digClimbBlock() {
+  async function climbOutOfHole() {
     if (!bot.entity || state.digging) return false;
     const base = bot.entity.position.floored();
-    const candidates = [
-      base.offset(0, 2, 0),
-      base.offset(0, 1, 0),
-      base.offset(1, 1, 0),
-      base.offset(-1, 1, 0),
-      base.offset(0, 1, 1),
-      base.offset(0, 1, -1),
-      base.offset(1, 0, 0),
-      base.offset(-1, 0, 0),
-      base.offset(0, 0, 1),
-      base.offset(0, 0, -1),
-    ];
-    for (const pos of candidates) {
-      const b = bot.blockAt(pos);
-      if (!b || b.boundingBox !== 'block') continue;
-      if (/bedrock|chest|furnace|crafting_table|water|lava|air/.test(b.name)) continue;
+
+    const above = bot.blockAt(base.offset(0, 2, 0));
+    if (above && above.boundingBox === 'block' && !/bedrock|chest|furnace|crafting_table|water|lava/.test(above.name)) {
       try {
         state.digging = true;
-        await bot.dig(b);
-        return true;
+        await bot.dig(above, true);
       } catch (_) {
       } finally {
         state.digging = false;
       }
     }
+
+    const scaffoldName = SCAFFOLD_NAMES.find((n) => S.itemCount(bot, n) > 0);
+    const below = bot.blockAt(base.offset(0, -1, 0));
+    if (scaffoldName && below && below.boundingBox === 'block') {
+      const item = bot.inventory.items().find((i) => i.name === scaffoldName);
+      if (item) {
+        try {
+          await bot.equip(item, 'hand');
+          bot.setControlState('jump', true);
+          await S.sleep(150);
+          await bot.placeBlock(below, new Vec3(0, 1, 0));
+          bot.setControlState('jump', false);
+          await S.sleep(150);
+          return true;
+        } catch (_) {
+          bot.setControlState('jump', false);
+        }
+      }
+    }
+
+    const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+    for (const [dx, dz] of dirs) {
+      for (const dy of [1, 2]) {
+        const wall = bot.blockAt(base.offset(dx, dy, dz));
+        if (wall && wall.boundingBox === 'block' && !/bedrock|chest|furnace|crafting_table|water|lava/.test(wall.name)) {
+          try {
+            state.digging = true;
+            await bot.dig(wall, true);
+          } catch (_) {
+          } finally {
+            state.digging = false;
+          }
+        }
+      }
+      try { await bot.lookAt(base.offset(dx + 0.5, 1.5, dz + 0.5), false); } catch (_) {}
+      bot.setControlState('forward', true);
+      bot.setControlState('sprint', true);
+      bot.setControlState('jump', true);
+      await S.sleep(550);
+      stopMelee();
+      bot.setControlState('sprint', false);
+      if (bot.entity.position.y > base.y + 0.4 || bot.entity.position.distanceTo(base.offset(0.5, 0, 0.5)) > 1.2) {
+        return true;
+      }
+    }
     return false;
   }
 
-  timers.push(setInterval(combatTick, 400));
-  timers.push(setInterval(() => { gear.eatIfNeeded(bot).catch(() => {}); }, 1200));
+  timers.push(setInterval(combatTick, 350));
+  timers.push(setInterval(() => { gear.eatIfNeeded(bot).catch(() => {}); }, 1000));
   timers.push(setInterval(() => {
     gear.equipBestArmor(bot).then(() => equipShield()).catch(() => {});
-  }, 6000));
+  }, 5000));
 
-  // Stuck detector: runs even during combat if stuck > 12s so holes/overhangs don't lock the bot
   let lastPos = null;
   let lastMoveAt = Date.now();
   let stuckCount = 0;
@@ -324,16 +358,17 @@ function startBrain(bot, cfg, log) {
       const p = bot.entity.position;
       const moved = !lastPos || p.distanceTo(lastPos) > 0.7;
       if (moved) { lastPos = p.clone(); lastMoveAt = now; stuckCount = 0; return; }
-      if (state.waiting || state.digging || gear.isEating()) { lastMoveAt = now; return; }
+      if (state.waiting || gear.isEating()) { lastMoveAt = now; return; }
 
       const inWater = S.isInWater(bot);
       const onLeaves = S.isOnLeaves(bot);
-      const limit = state.combat ? 12000 : (inWater || onLeaves ? 6000 : 12000);
+      const limit = inWater || onLeaves ? 4500 : 7500;
       if (now - lastMoveAt < limit) return;
 
       stuckCount++;
       lastMoveAt = Date.now();
       state.rescue = true;
+      state.digging = false;
       bot.pathfinder.setGoal(null);
       stopMelee();
 
@@ -344,36 +379,36 @@ function startBrain(bot, cfg, log) {
         log(`Stuck on tree leaves (${stuckCount}), climbing down`);
         await S.descendFromLeaves(ctx);
       } else {
-        log(`Stuck/trapped (${stuckCount}), digging/climbing free`);
-        await digClimbBlock();
+        log(`Stuck (${stuckCount}), climbing/moving out`);
+        await climbOutOfHole();
         await S.wiggle(ctx);
-        if (stuckCount >= 2 && !state.combat) await S.explore(ctx, 20);
+        if (stuckCount >= 2 && !state.combat) await S.explore(ctx, 18);
       }
     } catch (e) {
       if (!(e && e.message === 'STOPPED')) log(`unstuck error: ${e && e.message}`);
     } finally {
       state.rescue = false;
     }
-  }, 2500));
+  }, 2000));
 
   timers.push(setInterval(() => {
     const now = Date.now();
     for (const [id, t] of ignore) if (t < now) ignore.delete(id);
     if (state.badBlocks && typeof state.badBlocks.prune === 'function') state.badBlocks.prune();
-  }, 30000));
+  }, 25000));
 
   if (cfg.jumpWhileMoving !== false) {
     timers.push(setInterval(() => {
       try {
         const moving = typeof bot.pathfinder.isMoving === 'function' ? bot.pathfinder.isMoving() : false;
         if (!moving || state.digging || gear.isEating() || !bot.entity || !bot.entity.onGround) return;
-        if (Math.random() > 0.5) return;
+        if (Math.random() > 0.55) return;
         const ceiling = bot.blockAt(bot.entity.position.floored().offset(0, 2, 0));
         if (ceiling && ceiling.boundingBox === 'block') return;
         bot.setControlState('jump', true);
-        setTimeout(() => { try { bot.setControlState('jump', false); } catch (_) {} }, 140 + Math.floor(Math.random() * 60));
+        setTimeout(() => { try { bot.setControlState('jump', false); } catch (_) {} }, 130);
       } catch (_) {}
-    }, 1400));
+    }, 1200));
   }
 
   bot.on('death', () => {
@@ -381,9 +416,9 @@ function startBrain(bot, cfg, log) {
     const hadItems = bot.inventory.items().length > 0;
     if (p && hadItems) {
       state.loot = { pos: p.clone(), tries: 0, expires: Date.now() + 4.5 * 60 * 1000 };
-      log(`I died at ${p.x.toFixed(0)}, ${p.y.toFixed(0)}, ${p.z.toFixed(0)}. I will try to get my stuff back (3 tries)`);
+      log(`I died at ${p.x.toFixed(0)}, ${p.y.toFixed(0)}, ${p.z.toFixed(0)}. Trying to recover loot`);
     } else {
-      log('I died (nothing to recover), starting over');
+      log('I died, continuing');
     }
     state.combat = false;
     state.rescue = false;
@@ -392,7 +427,6 @@ function startBrain(bot, cfg, log) {
     stopMelee();
   });
 
-  // ---------------- stages ----------------
   const have = (n) => S.itemCount(bot, n);
   const logsWorth = () => S.countWhere(bot, S.isLog) + Math.floor(S.countWhere(bot, S.isPlanks) / 4);
 
@@ -427,22 +461,12 @@ function startBrain(bot, cfg, log) {
         const loot = state.loot;
         loot.tries++;
         const before = invCount();
-        log(`Going back to where I died (try ${loot.tries}/3)`);
-        await S.gotoGoal(ctx, new goals.GoalNear(loot.pos.x, loot.pos.y, loot.pos.z, 3), 60000);
-        await S.pickupDrops(ctx, 16);
-        await S.sleep(600);
+        await S.gotoGoal(ctx, new goals.GoalNear(loot.pos.x, loot.pos.y, loot.pos.z, 3), 25000);
         await S.pickupDrops(ctx, 16);
         await gear.equipBestArmor(bot);
         await gear.equipBestWeapon(bot);
         await equipShield();
-        const gained = invCount() - before;
-        if (gained > 0) {
-          log(`Got ${gained} items back`);
-          state.loot = null;
-          return true;
-        }
-        if (loot.tries >= 3) {
-          log('Could not get my loot back after 3 tries, going back to grinding');
+        if (invCount() - before > 0 || loot.tries >= 3) {
           state.loot = null;
           return true;
         }
@@ -453,7 +477,7 @@ function startBrain(bot, cfg, log) {
       name: 'emergency food',
       done: () => gear.foodCount(bot) > 0 || ((bot.food === undefined || bot.food >= 14) && bot.health > 8),
       run: async () => {
-        await S.hunt(ctx, 3);
+        await S.hunt(ctx, 2);
         await S.cookMeat(ctx);
         return gear.foodCount(bot) > 0;
       },
@@ -462,8 +486,8 @@ function startBrain(bot, cfg, log) {
       name: 'wood + wooden pickaxe',
       done: () => S.toolTier(bot, 'pickaxe') >= 1,
       run: async () => {
-        if (logsWorth() < 10) {
-          await S.collect(ctx, LOG_NAMES, 12, logsWorth, { canDig: true, maxAbove: 6 });
+        if (logsWorth() < 8) {
+          await S.collect(ctx, LOG_NAMES, 10, logsWorth, { canDig: true, maxAbove: 6, maxDistance: 40 });
         }
         if (logsWorth() < 3) return false;
         if (!(await S.craftTool(ctx, 'wooden_pickaxe'))) return false;
@@ -476,8 +500,7 @@ function startBrain(bot, cfg, log) {
       name: 'stone tools + furnace',
       done: () => S.toolTier(bot, 'pickaxe') >= 2 && S.toolTier(bot, 'sword') >= 2,
       run: async () => {
-        const need = 22;
-        await S.collect(ctx, ['stone'], need, () => S.countWhere(bot, S.isCobble), { maxDistance: 48 });
+        await S.collect(ctx, ['stone'], 16, () => S.countWhere(bot, S.isCobble), { maxDistance: 36 });
         await S.craftTool(ctx, 'stone_pickaxe');
         await S.craftTool(ctx, 'stone_sword');
         if (S.toolTier(bot, 'axe') < 2) await S.craftTool(ctx, 'stone_axe');
@@ -487,11 +510,11 @@ function startBrain(bot, cfg, log) {
     },
     {
       name: 'food',
-      done: () => gear.foodCount(bot) >= 4,
+      done: () => gear.foodCount(bot) >= 3,
       run: async () => {
-        await S.hunt(ctx, 6);
+        await S.hunt(ctx, 4);
         await S.cookMeat(ctx);
-        return gear.foodCount(bot) >= 4;
+        return gear.foodCount(bot) >= 3;
       },
     },
     {
@@ -502,23 +525,23 @@ function startBrain(bot, cfg, log) {
         if (door) {
           state.home = door.position;
           state.houseBuilt = true;
-          log('Found my base (a door nearby), skipping building');
+          log('Found existing base door');
           return true;
         }
-        await S.collect(ctx, ['stone'], 80, () => S.buildCount(bot), { maxDistance: 48 });
-        if (S.buildCount(bot) < 72) {
-          await S.collect(ctx, ['dirt', 'grass_block'], 80, () => S.buildCount(bot), { canDig: true, maxDistance: 32 });
+        await S.collect(ctx, ['stone'], 36, () => S.buildCount(bot), { maxDistance: 36 });
+        if (S.buildCount(bot) < 30) {
+          await S.collect(ctx, ['dirt', 'grass_block'], 36, () => S.buildCount(bot), { canDig: true, maxDistance: 28 });
         }
-        if (S.buildCount(bot) < 72) return false;
-        await S.ensurePlanks(ctx, 6).catch(() => {});
+        if (S.buildCount(bot) < 30) return false;
+        await S.ensurePlanks(ctx, 4).catch(() => {});
         const site = S.findBuildSite(bot);
         if (!site) return false;
-        log(`Building base house at ${site.x}, ${site.y + 1}, ${site.z}`);
+        log(`Building fast base at ${site.x}, ${site.y + 1}, ${site.z}`);
         const ok = await S.buildHouse(ctx, site);
         if (ok) {
           state.home = bot.entity.position.clone();
           state.houseBuilt = true;
-          log('Base house finished');
+          log('Base finished');
         }
         return ok;
       },
@@ -531,11 +554,11 @@ function startBrain(bot, cfg, log) {
         const ingotsNeeded = missing.reduce((sum, n) => sum + (S.COST[n] ? S.COST[n].iron || 0 : 0), 0) + (have('shield') ? 0 : 1);
         const stock = () => have('raw_iron') + have('iron_ingot');
         if (stock() < ingotsNeeded) {
-          if (have('coal') + have('charcoal') < 4 && S.countWhere(bot, S.isLog) < 12) {
-            await S.collect(ctx, COAL_ORES, 4, () => have('coal'), { maxDistance: 64 });
-            if (have('coal') < 2) await S.collect(ctx, LOG_NAMES, 12, () => S.countWhere(bot, S.isLog), { canDig: true, maxAbove: 6 });
+          if (have('coal') + have('charcoal') < 3 && S.countWhere(bot, S.isLog) < 8) {
+            await S.collect(ctx, COAL_ORES, 3, () => have('coal'), { maxDistance: 48 });
+            if (have('coal') < 2) await S.collect(ctx, LOG_NAMES, 8, () => S.countWhere(bot, S.isLog), { canDig: true, maxAbove: 6, maxDistance: 40 });
           }
-          await S.collect(ctx, IRON_ORES, ingotsNeeded, stock, { maxDistance: 100 });
+          await S.collect(ctx, IRON_ORES, ingotsNeeded, stock, { maxDistance: 72 });
         }
         if (have('raw_iron') > 0) await S.smelt(ctx, 'raw_iron', 'iron_ingot', have('raw_iron'));
         for (const name of missing) {
@@ -556,7 +579,7 @@ function startBrain(bot, cfg, log) {
         const missing = missingDiamond();
         const diamondsNeeded = missing.reduce((sum, n) => sum + (S.COST[n] ? S.COST[n].diamond || 0 : 0), 0);
         if (have('diamond') < diamondsNeeded) {
-          await S.collect(ctx, DIAMOND_ORES, diamondsNeeded, () => have('diamond'), { maxDistance: 110 });
+          await S.collect(ctx, DIAMOND_ORES, diamondsNeeded, () => have('diamond'), { maxDistance: 80 });
         }
         for (const name of missing) {
           if (have('diamond') >= (S.COST[name].diamond || 0)) {
@@ -588,19 +611,19 @@ function startBrain(bot, cfg, log) {
 
   async function idleStep() {
     const base = state.home || bot.entity.position;
-    const x = base.x + (Math.random() * 12 - 6);
-    const z = base.z + (Math.random() * 12 - 6);
-    await S.gotoGoal(ctx, new goals.GoalNear(x, base.y, z, 1), 15000);
-    await S.sleep(5000);
+    const x = base.x + (Math.random() * 10 - 5);
+    const z = base.z + (Math.random() * 10 - 5);
+    await S.gotoGoal(ctx, new goals.GoalNear(x, base.y, z, 1), 10000);
+    await S.sleep(3500);
   }
 
   async function mainLoop() {
-    try { if (bot.waitForChunksToLoad) await Promise.race([bot.waitForChunksToLoad(), S.sleep(10000)]); } catch (_) {}
-    await S.sleep(500);
-    log('Brain started: wood -> stone -> food -> base -> iron -> diamond -> enchant');
+    try { if (bot.waitForChunksToLoad) await Promise.race([bot.waitForChunksToLoad(), S.sleep(8000)]); } catch (_) {}
+    await S.sleep(300);
+    log('Fast brain started');
     while (!state.stopped) {
       try {
-        if (!bot.entity || bot.health <= 0) { await S.sleep(2000); continue; }
+        if (!bot.entity || bot.health <= 0) { await S.sleep(1500); continue; }
         const now = Date.now();
         const stage = STAGES.find((s) => !s.done() && !((skipUntil[s.name] || 0) > now));
         if (!stage) { await idleStep(); continue; }
@@ -612,23 +635,19 @@ function startBrain(bot, cfg, log) {
           log(`Stage done: ${stage.name}`);
         } else {
           fails[stage.name] = (fails[stage.name] || 0) + 1;
-          log(`Stage not finished: ${stage.name} (try ${fails[stage.name]})`);
+          log(`Stage retry: ${stage.name} (try ${fails[stage.name]})`);
           if (fails[stage.name] >= 3) {
-            skipUntil[stage.name] = Date.now() + 3 * 60 * 1000;
+            skipUntil[stage.name] = Date.now() + 2 * 60 * 1000;
             fails[stage.name] = 0;
-            log(`Skipping "${stage.name}" for 3 minutes`);
           }
-          if (fails[stage.name] >= 2) {
-            await S.explore(ctx, 40);
-          } else {
-            await digClimbBlock();
-            await S.sleep(1500);
-          }
+          await climbOutOfHole();
+          if (fails[stage.name] >= 2) await S.explore(ctx, 24);
+          else await S.sleep(700);
         }
       } catch (e) {
         if (e && e.message === 'STOPPED') return;
         log(`Error: ${e && e.stack ? e.stack.split('\n').slice(0, 3).join(' | ') : e}`);
-        await S.sleep(3000);
+        await S.sleep(2000);
       }
     }
   }
