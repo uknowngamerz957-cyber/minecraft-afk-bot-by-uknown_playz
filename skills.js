@@ -1,4 +1,4 @@
-// skills.js - movement, mining, crafting, smelting, hunting, base building, and enchanting
+// skills.js - fast mining, fast collecting, fast house & gear progression
 
 const { goals } = require('mineflayer-pathfinder');
 const { Vec3 } = require('vec3');
@@ -54,15 +54,13 @@ const COST = {
   enchanting_table: { diamond: 2, obsidian: 4, book: 1 },
 };
 
-// ---------- small helpers ----------
 function check(ctx) {
   if (ctx.state.stopped) throw new Error('STOPPED');
 }
 
 function hasBad(state, key) {
   if (!state || !state.badBlocks) return false;
-  if (typeof state.badBlocks.has === 'function') return state.badBlocks.has(key);
-  return false;
+  return typeof state.badBlocks.has === 'function' ? state.badBlocks.has(key) : false;
 }
 
 function markBad(state, key) {
@@ -107,8 +105,7 @@ function hasArmorPiece(bot, piece, minTier = 3) {
   const re = new RegExp('^(iron|diamond|netherite)_' + piece + '$');
   const checkName = (n) => {
     if (!re.test(n)) return false;
-    const prefix = n.split('_')[0];
-    return (TIERS[prefix] || 0) >= minTier;
+    return (TIERS[n.split('_')[0]] || 0) >= minTier;
   };
   if (gear.equippedNames(bot).some(checkName)) return true;
   return bot.inventory.items().some((i) => checkName(i.name));
@@ -117,49 +114,37 @@ function hasArmorPiece(bot, piece, minTier = 3) {
 async function humanLookAt(bot, vec) {
   if (!bot || !bot.entity || !vec) return;
   const jitter = vec.offset(
-    (Math.random() - 0.5) * 0.14,
-    (Math.random() - 0.5) * 0.12,
-    (Math.random() - 0.5) * 0.14
+    (Math.random() - 0.5) * 0.1,
+    (Math.random() - 0.5) * 0.08,
+    (Math.random() - 0.5) * 0.1
   );
   try { await bot.lookAt(jitter, false); } catch (_) {}
 }
 
 async function cleanInventoryIfNeeded(ctx) {
-  const { bot, log } = ctx;
+  const { bot } = ctx;
   const items = bot.inventory.items();
-  if (items.length < 28) return;
+  if (items.length < 30) return;
 
   for (const item of items) {
     if (JUNK_NAMES.has(item.name)) {
-      try { await bot.tossStack(item); await sleep(120); } catch (_) {}
-    }
-  }
-
-  // if still crowded, trim excess dirt/gravel above 32
-  for (const item of bot.inventory.items()) {
-    if ((item.name === 'dirt' || item.name === 'gravel' || item.name === 'cobblestone') && item.count > 48) {
-      try {
-        await bot.toss(item.type, null, item.count - 32);
-        log(`Trimmed excess ${item.name}`);
-        await sleep(120);
-        if (bot.inventory.items().length < 26) break;
-      } catch (_) {}
+      try { await bot.tossStack(item); await sleep(60); } catch (_) {}
     }
   }
 }
 
-async function waitNoCombat(ctx, maxMs = 90000) {
+async function waitNoCombat(ctx, maxMs = 60000) {
   const t0 = Date.now();
   while ((ctx.state.combat || ctx.state.rescue || gear.isEating()) && Date.now() - t0 < maxMs) {
     check(ctx);
-    await sleep(250);
+    await sleep(150);
   }
 }
 
-// ---------- walking ----------
-async function gotoGoal(ctx, goal, timeout = 40000) {
+// ---------- fast walking ----------
+async function gotoGoal(ctx, goal, timeout = 18000) {
   const { bot } = ctx;
-  for (let attempt = 0; attempt < 4; attempt++) {
+  for (let attempt = 0; attempt < 2; attempt++) {
     check(ctx);
     await waitNoCombat(ctx);
     let timer;
@@ -174,7 +159,7 @@ async function gotoGoal(ctx, goal, timeout = 40000) {
     } catch (e) {
       const msg = String((e && e.message) || e);
       if (e && (e.name === 'GoalChanged' || /goal was changed/i.test(msg))) continue;
-      if (/timeout/.test(msg)) bot.pathfinder.setGoal(null);
+      try { bot.pathfinder.setGoal(null); } catch (_) {}
       return false;
     } finally {
       clearTimeout(timer);
@@ -183,15 +168,15 @@ async function gotoGoal(ctx, goal, timeout = 40000) {
   return false;
 }
 
-async function explore(ctx, dist = 40) {
+async function explore(ctx, dist = 28) {
   const p = ctx.bot.entity.position;
   const a = Math.random() * Math.PI * 2;
-  return gotoGoal(ctx, new goals.GoalXZ(p.x + Math.cos(a) * dist, p.z + Math.sin(a) * dist), 30000);
+  return gotoGoal(ctx, new goals.GoalXZ(p.x + Math.cos(a) * dist, p.z + Math.sin(a) * dist), 16000);
 }
 
-async function pickupDrops(ctx, radius = 7) {
+async function pickupDrops(ctx, radius = 8) {
   const { bot } = ctx;
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < 4; i++) {
     const me = bot.entity.position;
     const items = Object.values(bot.entities)
       .filter((e) => e && e.position && (e.name === 'item' || e.displayName === 'Item'))
@@ -199,12 +184,12 @@ async function pickupDrops(ctx, radius = 7) {
       .sort((a, b) => a.position.distanceTo(me) - b.position.distanceTo(me));
     if (!items.length) return;
     const t = items[0].position;
-    await gotoGoal(ctx, new goals.GoalNear(t.x, t.y, t.z, 0.8), 8000);
-    await sleep(150);
+    await gotoGoal(ctx, new goals.GoalNear(t.x, t.y, t.z, 0.9), 5000);
+    await sleep(60);
   }
 }
 
-// ---------- mining ----------
+// ---------- fast mining ----------
 async function equipBestToolFor(bot, block) {
   let best = null;
   let bestTime = Infinity;
@@ -216,7 +201,7 @@ async function equipBestToolFor(bot, block) {
   }
   let handTime = Infinity;
   try { handTime = block.digTime(null, false, false, false, [], bot.entity.effects); } catch (_) {}
-  if (best && bestTime < handTime) {
+  if (best && bestTime < handTime && (!bot.heldItem || bot.heldItem.name !== best.name)) {
     try { await bot.equip(best, 'hand'); } catch (_) {}
   }
   return best;
@@ -228,38 +213,36 @@ async function mineBlock(ctx, block, opts = {}) {
   const key = p.toString();
 
   const eye = bot.entity.position.offset(0, bot.entity.height || 1.62, 0);
-  const inReach = eye.distanceTo(p.offset(0.5, 0.5, 0.5)) <= 4.3;
+  const inReach = eye.distanceTo(p.offset(0.5, 0.5, 0.5)) <= 4.6;
   let ok = true;
   if (!inReach) {
     ctx.movements.canDig = opts.canDig !== false;
-    ok = await gotoGoal(ctx, new goals.GoalGetToBlock(p.x, p.y, p.z), 25000);
+    ok = await gotoGoal(ctx, new goals.GoalNear(p.x, p.y, p.z, 3), 12000);
     ctx.movements.canDig = false;
   }
 
   const target = bot.blockAt(p);
   if (!target || target.type !== block.type) return true;
-  if (!ok || bot.entity.position.offset(0, bot.entity.height || 1.62, 0).distanceTo(p.offset(0.5, 0.5, 0.5)) > 5.2) {
-    markBad(state, key);
-    return false;
+  if (bot.entity.position.offset(0, bot.entity.height || 1.62, 0).distanceTo(p.offset(0.5, 0.5, 0.5)) > 5.5) {
+    if (!ok) { markBad(state, key); return false; }
   }
+
   await equipBestToolFor(bot, target);
   if (!target.canHarvest(bot.heldItem ? bot.heldItem.type : null)) {
     markBad(state, key);
     return false;
   }
+
   try {
     state.digging = true;
-    await bot.dig(target);
+    await bot.dig(target, true);
+    return true;
   } catch (_) {
     markBad(state, key);
     return false;
   } finally {
     state.digging = false;
   }
-  await sleep(100);
-  await pickupDrops(ctx, 6);
-  await cleanInventoryIfNeeded(ctx);
-  return true;
 }
 
 async function collect(ctx, names, want, haveFn, opts = {}) {
@@ -271,26 +254,49 @@ async function collect(ctx, names, want, haveFn, opts = {}) {
   }
   let fails = 0;
   let explores = 0;
+  let dugSincePickup = 0;
+
   while (haveFn() < want) {
     check(ctx);
-    if (fails >= 8 || explores >= 6) return false;
+    if (fails >= 6 || explores >= 4) {
+      await pickupDrops(ctx, 8);
+      await cleanInventoryIfNeeded(ctx);
+      return haveFn() >= want;
+    }
     await waitNoCombat(ctx);
     const me = bot.entity.position;
     const found = bot
-      .findBlocks({ matching: ids, maxDistance: opts.maxDistance || 64, count: 60 })
+      .findBlocks({ matching: ids, maxDistance: opts.maxDistance || 48, count: 60 })
       .filter((pos) => !hasBad(state, pos.toString()))
       .filter((pos) => opts.maxAbove === undefined || pos.y - me.y <= opts.maxAbove)
       .sort((a, b) => a.distanceTo(me) - b.distanceTo(me));
+
     if (!found.length) {
+      await pickupDrops(ctx, 8);
       explores++;
-      await explore(ctx, 40);
+      await explore(ctx, 28);
       continue;
     }
+
     const block = bot.blockAt(found[0]);
     if (!block) { markBad(state, found[0].toString()); continue; }
     const ok = await mineBlock(ctx, block, opts);
-    if (ok) fails = 0; else fails++;
+    if (ok) {
+      fails = 0;
+      dugSincePickup++;
+      // drops batch mein uthao taaki har block pe rukna na pade
+      if (dugSincePickup >= 6 || haveFn() >= want) {
+        dugSincePickup = 0;
+        await pickupDrops(ctx, 8);
+        await cleanInventoryIfNeeded(ctx);
+      }
+    } else {
+      fails++;
+    }
   }
+
+  await pickupDrops(ctx, 8);
+  await cleanInventoryIfNeeded(ctx);
   return true;
 }
 
@@ -314,7 +320,7 @@ async function placeBlockNearby(ctx, itemName) {
     if (below && below.boundingBox === 'block' && at && at.name === 'air') {
       try {
         await bot.placeBlock(below, new Vec3(0, 1, 0));
-        await sleep(200);
+        await sleep(100);
         return bot.blockAt(target);
       } catch (_) {}
     }
@@ -370,7 +376,7 @@ async function getTable(ctx) {
     if (!t) return null;
   }
   if (bot.entity.position.distanceTo(t.position) > 3.5) {
-    await gotoGoal(ctx, new goals.GoalNear(t.position.x, t.position.y, t.position.z, 2), 20000);
+    await gotoGoal(ctx, new goals.GoalNear(t.position.x, t.position.y, t.position.z, 2), 12000);
   }
   return t;
 }
@@ -403,7 +409,7 @@ async function getFurnace(ctx) {
     if (!f) return null;
   }
   if (bot.entity.position.distanceTo(f.position) > 3) {
-    await gotoGoal(ctx, new goals.GoalNear(f.position.x, f.position.y, f.position.z, 2), 20000);
+    await gotoGoal(ctx, new goals.GoalNear(f.position.x, f.position.y, f.position.z, 2), 12000);
   }
   return f;
 }
@@ -441,15 +447,15 @@ async function smelt(ctx, inputName, outputName, want) {
     furnace.close();
   }
 
-  const deadline = Date.now() + total * 11000 + 30000;
+  const deadline = Date.now() + total * 11000 + 25000;
   ctx.state.waiting = true;
   try {
     while (itemCount(bot, outputName) - startOut < total && Date.now() < deadline) {
       check(ctx);
-      await sleep(8000);
+      await sleep(6000);
       await waitNoCombat(ctx);
       if (bot.entity.position.distanceTo(furnaceBlock.position) > 4) {
-        await gotoGoal(ctx, new goals.GoalNear(furnaceBlock.position.x, furnaceBlock.position.y, furnaceBlock.position.z, 2), 20000);
+        await gotoGoal(ctx, new goals.GoalNear(furnaceBlock.position.x, furnaceBlock.position.y, furnaceBlock.position.z, 2), 12000);
       }
       try {
         furnace = await bot.openFurnace(furnaceBlock);
@@ -466,16 +472,16 @@ async function smelt(ctx, inputName, outputName, want) {
 async function hunt(ctx, wantFood) {
   const { bot } = ctx;
   let attempts = 0;
-  while (gear.foodCount(bot) < wantFood && attempts < 10) {
+  while (gear.foodCount(bot) < wantFood && attempts < 8) {
     check(ctx);
     await waitNoCombat(ctx);
     const me = bot.entity.position;
     const animal = Object.values(bot.entities)
-      .filter((e) => e && e.position && ANIMALS.has(e.name) && e.position.distanceTo(me) < 80)
+      .filter((e) => e && e.position && ANIMALS.has(e.name) && e.position.distanceTo(me) < 64)
       .sort((a, b) => a.position.distanceTo(me) - b.position.distanceTo(me))[0];
     if (!animal) {
       attempts++;
-      await explore(ctx, 50);
+      await explore(ctx, 32);
       continue;
     }
     attempts++;
@@ -483,23 +489,23 @@ async function hunt(ctx, wantFood) {
     const t0 = Date.now();
     let lastHit = 0;
     let following = false;
-    while (bot.entities[animal.id] && Date.now() - t0 < 25000) {
+    while (bot.entities[animal.id] && Date.now() - t0 < 18000) {
       check(ctx);
       await waitNoCombat(ctx);
       const dist = bot.entity.position.distanceTo(animal.position);
       if (dist > 3) {
         if (!following) { bot.pathfinder.setGoal(new goals.GoalFollow(animal, 2), true); following = true; }
-      } else if (Date.now() - lastHit > gear.weaponCooldown(bot) + 50) {
+      } else if (Date.now() - lastHit > gear.weaponCooldown(bot) + 30) {
         lastHit = Date.now();
         try {
           await humanLookAt(bot, animal.position.offset(0, animal.height * 0.7, 0));
           bot.attack(animal);
         } catch (_) {}
       }
-      await sleep(150);
+      await sleep(120);
     }
     bot.pathfinder.setGoal(null);
-    await sleep(300);
+    await sleep(200);
     await pickupDrops(ctx, 8);
     await cleanInventoryIfNeeded(ctx);
   }
@@ -515,39 +521,39 @@ async function cookMeat(ctx) {
   }
 }
 
-// ---------- building ----------
+// ---------- fast base building (compact 3x3 walls + roof) ----------
 const AIRS = ['air', 'cave_air', 'void_air'];
 const LIQUIDS = ['water', 'lava'];
 const isSolid = (b) => !!b && b.boundingBox === 'block';
 
 function housePlan(cx, cy, cz) {
-  const ring = [];
-  for (let dx = -2; dx <= 2; dx++) {
-    for (let dz = -2; dz <= 2; dz++) {
-      if (Math.abs(dx) === 2 || Math.abs(dz) === 2) ring.push([dx, dz]);
-    }
-  }
-  ring.sort((a, b) => Math.atan2(a[1], a[0]) - Math.atan2(b[1], b[0]));
+  const ring = [
+    [-1, -1], [0, -1], [1, -1],
+    [1, 0], [1, 1], [0, 1],
+    [-1, 1], [-1, 0],
+  ];
   const cells = [];
-  for (let layer = 1; layer <= 3; layer++) {
+  for (let layer = 1; layer <= 2; layer++) {
     for (const [dx, dz] of ring) {
-      if (dx === 0 && dz === 2 && layer <= 2) continue;
+      if (dx === 0 && dz === 1 && layer === 1) continue; // door gap
       cells.push(new Vec3(cx + dx, cy + layer, cz + dz));
     }
   }
-  const roofY = cy + 4;
-  for (const [dx, dz] of ring) cells.push(new Vec3(cx + dx, roofY, cz + dz));
-  const inner = [[0, 1], [1, 0], [0, -1], [-1, 0], [1, 1], [1, -1], [-1, 1], [-1, -1], [0, 0]];
-  for (const [dx, dz] of inner) cells.push(new Vec3(cx + dx, roofY, cz + dz));
+  const roofY = cy + 3;
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dz = -1; dz <= 1; dz++) {
+      cells.push(new Vec3(cx + dx, roofY, cz + dz));
+    }
+  }
   return cells;
 }
 
 function siteBadness(bot, cx, cy, cz) {
   let bad = 0;
-  for (let dx = -2; dx <= 2; dx++) {
-    for (let dz = -2; dz <= 2; dz++) {
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dz = -1; dz <= 1; dz++) {
       const g = bot.blockAt(new Vec3(cx + dx, cy, cz + dz));
-      if (!g) { bad += 5; continue; }
+      if (!g) { bad += 4; continue; }
       if (!isSolid(g) || /leaves|_log$/.test(g.name)) bad++;
       const feet = bot.blockAt(new Vec3(cx + dx, cy + 1, cz + dz));
       if (feet && LIQUIDS.includes(feet.name)) bad += 4;
@@ -560,7 +566,7 @@ function findBuildSite(bot) {
   const me = bot.entity.position.floored();
   const cy = me.y - 1;
   let best = null;
-  for (let r = 0; r <= 24; r += 6) {
+  for (let r = 0; r <= 18; r += 6) {
     for (let dx = -r; dx <= r; dx += 6) {
       for (let dz = -r; dz <= r; dz += 6) {
         if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
@@ -597,220 +603,12 @@ async function buildHouse(ctx, site) {
   const { x: cx, y: cy, z: cz } = site;
   const center = new Vec3(cx, cy + 1, cz);
 
-  if (!(await gotoGoal(ctx, new goals.GoalBlock(cx, cy + 1, cz), 40000))) return false;
+  await gotoGoal(ctx, new goals.GoalBlock(cx, cy + 1, cz), 15000);
 
   let cleared = 0;
-  for (let dy = 1; dy <= 4; dy++) {
-    for (let dx = -2; dx <= 2; dx++) {
-      for (let dz = -2; dz <= 2; dz++) {
+  for (let dy = 1; dy <= 3; dy++) {
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dz = -1; dz <= 1; dz++) {
         const b = bot.blockAt(new Vec3(cx + dx, cy + dy, cz + dz));
         if (!b || AIRS.includes(b.name) || LIQUIDS.includes(b.name)) continue;
-        if (cleared++ > 80) return false;
-        await equipBestToolFor(bot, b);
-        try { state.digging = true; await bot.dig(b); } catch (_) {} finally { state.digging = false; }
-      }
-    }
-  }
-
-  for (let dx = -2; dx <= 2; dx++) {
-    for (let dz = -2; dz <= 2; dz++) {
-      const item = pickBuildItem(bot);
-      if (!item) return false;
-      await placeAt(ctx, new Vec3(cx + dx, cy, cz + dz), item);
-    }
-  }
-
-  let failures = 0;
-  for (const pos of housePlan(cx, cy, cz)) {
-    check(ctx);
-    await waitNoCombat(ctx);
-    const item = pickBuildItem(bot);
-    if (!item) { log('house: ran out of blocks'); return false; }
-    if (bot.entity.position.distanceTo(center.offset(0.5, 0, 0.5)) > 2.2) {
-      await gotoGoal(ctx, new goals.GoalBlock(cx, cy + 1, cz), 20000);
-    }
-    const ok = await placeAt(ctx, pos, item);
-    if (!ok && ++failures > 12) { log('house: too many failed placements'); return false; }
-    await sleep(120);
-  }
-
-  try {
-    const planks = bot.inventory.items().find((i) => isPlanks(i.name));
-    if (planks || (await ensurePlanks(ctx, 6))) {
-      const p = bot.inventory.items().find((i) => isPlanks(i.name));
-      const doorName = p.name.replace('_planks', '_door');
-      if (itemCount(bot, doorName) === 0 && (await ensurePlanks(ctx, 6))) {
-        const table = await getTable(ctx);
-        if (table) await craftRaw(ctx, doorName, table, 1);
-        await gotoGoal(ctx, new goals.GoalBlock(cx, cy + 1, cz), 20000);
-      }
-      const door = bot.inventory.items().find((i) => i.name === doorName);
-      if (door) {
-        await bot.equip(door, 'hand');
-        await bot.placeBlock(bot.blockAt(new Vec3(cx, cy, cz + 2)), new Vec3(0, 1, 0));
-      }
-    }
-    if (itemCount(bot, 'torch') === 0 && itemCount(bot, 'coal') + itemCount(bot, 'charcoal') > 0 && itemCount(bot, 'stick') > 0) {
-      await craftRaw(ctx, 'torch', null, 1);
-    }
-    const torch = bot.inventory.items().find((i) => i.name === 'torch');
-    if (torch) {
-      await bot.equip(torch, 'hand');
-      await bot.placeBlock(bot.blockAt(new Vec3(cx - 1, cy, cz - 1)), new Vec3(0, 1, 0));
-    }
-  } catch (e) {
-    log(`door/torch skipped: ${e.message}`);
-  }
-  return true;
-}
-
-function findExistingDoor(bot) {
-  const ids = Object.values(bot.registry.blocksByName)
-    .filter((b) => /_door$/.test(b.name))
-    .map((b) => b.id);
-  if (!ids.length) return null;
-  return bot.findBlock({ matching: ids, maxDistance: 48 });
-}
-
-// ---------- enchanting ----------
-async function enchantGear(ctx) {
-  const { bot, log } = ctx;
-  const xp = bot.experience && typeof bot.experience.level === 'number' ? bot.experience.level : 0;
-  const lapis = itemCount(bot, 'lapis_lazuli');
-
-  const targets = bot.inventory.items().filter((i) =>
-    /^(iron|diamond)_(sword|pickaxe|axe|helmet|chestplate|leggings|boots)$/.test(i.name) &&
-    (!i.nbt || !i.nbt.value || !i.nbt.value.Enchantments)
-  );
-  if (!targets.length) return true;
-
-  if (xp < 3 || lapis < 1) {
-    log(`Enchanting skipped for now (level=${xp}, lapis=${lapis})`);
-    return true;
-  }
-
-  const enchDef = bot.registry.blocksByName.enchanting_table;
-  let tableBlock = enchDef ? bot.findBlock({ matching: enchDef.id, maxDistance: 24 }) : null;
-  if (!tableBlock && itemCount(bot, 'enchanting_table') > 0) {
-    tableBlock = await placeBlockNearby(ctx, 'enchanting_table');
-  }
-  if (!tableBlock || typeof bot.openEnchantmentTable !== 'function') {
-    log('No enchanting table available yet, keeping gear as-is');
-    return true;
-  }
-
-  if (bot.entity.position.distanceTo(tableBlock.position) > 3.5) {
-    await gotoGoal(ctx, new goals.GoalNear(tableBlock.position.x, tableBlock.position.y, tableBlock.position.z, 2), 20000);
-  }
-
-  let enchantedAny = false;
-  for (const item of targets.slice(0, 4)) {
-    let table;
-    try {
-      table = await bot.openEnchantmentTable(tableBlock);
-      await table.putTargetItem(item);
-      const lapisItem = bot.inventory.items().find((i) => i.name === 'lapis_lazuli');
-      if (!lapisItem) break;
-      await table.putLapis(lapisItem);
-      await sleep(250);
-      const slot = xp >= 15 ? 2 : xp >= 8 ? 1 : 0;
-      await table.enchant(slot);
-      enchantedAny = true;
-      log(`Enchanted ${item.name} at slot ${slot}`);
-    } catch (_) {
-      break;
-    } finally {
-      if (table) {
-        try {
-          if (table.targetItem()) await table.takeTargetItem();
-          if (table.lapisItem()) await table.takeLapis();
-          table.close();
-        } catch (_) {}
-      }
-    }
-  }
-  return enchantedAny || targets.length > 0;
-}
-
-// ---------- getting unstuck ----------
-function isInWater(bot) {
-  const feet = bot.blockAt(bot.entity.position.floored());
-  return !!bot.entity.isInWater || !!(feet && (feet.name === 'water' || feet.name === 'bubble_column'));
-}
-
-function isOnLeaves(bot) {
-  const below = bot.blockAt(bot.entity.position.offset(0, -0.5, 0).floored());
-  return !!below && /leaves/.test(below.name);
-}
-
-async function escapeWater(ctx) {
-  const { bot } = ctx;
-  for (let i = 0; i < 8; i++) {
-    check(ctx);
-    if (!isInWater(bot)) return true;
-    const me = bot.entity.position.floored();
-    let best = null;
-    let bestD = Infinity;
-    for (let dx = -14; dx <= 14; dx++) {
-      for (let dz = -14; dz <= 14; dz++) {
-        for (let dy = -3; dy <= 3; dy++) {
-          const b = bot.blockAt(me.offset(dx, dy, dz));
-          if (!b || b.boundingBox !== 'block' || LIQUIDS.includes(b.name) || /leaves/.test(b.name)) continue;
-          const a1 = bot.blockAt(b.position.offset(0, 1, 0));
-          const a2 = bot.blockAt(b.position.offset(0, 2, 0));
-          if (a1 && a2 && a1.name === 'air' && a2.name === 'air') {
-            const d = dx * dx + dz * dz + dy * dy;
-            if (d < bestD) { bestD = d; best = b.position; }
-          }
-        }
-      }
-    }
-    if (best) {
-      await humanLookAt(bot, best.offset(0.5, 1.5, 0.5));
-    } else {
-      try { await bot.look(Math.random() * Math.PI * 2, 0, false); } catch (_) {}
-    }
-    bot.setControlState('forward', true);
-    bot.setControlState('sprint', true);
-    bot.setControlState('jump', true);
-    await sleep(1500);
-    for (const c of ['forward', 'sprint', 'jump']) bot.setControlState(c, false);
-  }
-  return !isInWater(bot);
-}
-
-async function descendFromLeaves(ctx) {
-  const { bot, state } = ctx;
-  for (let i = 0; i < 30; i++) {
-    check(ctx);
-    const below = bot.blockAt(bot.entity.position.offset(0, -0.5, 0).floored());
-    if (!below) return false;
-    if (/leaves/.test(below.name)) {
-      await equipBestToolFor(bot, below);
-      try { state.digging = true; await bot.dig(below); } catch (_) {} finally { state.digging = false; }
-      await sleep(350);
-      continue;
-    }
-    if (below.boundingBox === 'block') return true;
-    await sleep(250);
-  }
-  return false;
-}
-
-async function wiggle(ctx) {
-  const { bot } = ctx;
-  try { await bot.look(Math.random() * Math.PI * 2, 0, false); } catch (_) {}
-  bot.setControlState('forward', true);
-  bot.setControlState('jump', true);
-  bot.setControlState('sprint', true);
-  await sleep(1500);
-  for (const c of ['forward', 'jump', 'sprint']) bot.setControlState(c, false);
-}
-
-module.exports = {
-  isInWater, isOnLeaves, escapeWater, descendFromLeaves, wiggle,
-  sleep, check, itemCount, countWhere, isLog, isPlanks, isCobble, buildCount, toolTier, hasArmorPiece,
-  cleanInventoryIfNeeded, waitNoCombat, gotoGoal, explore, pickupDrops, collect, mineBlock,
-  craftTool, getTable, craftRaw, ensurePlanks, smelt, hunt, cookMeat,
-  housePlan, findBuildSite, buildHouse, findExistingDoor, enchantGear, COST,
-};
+        if (cleared++ > 35) break
