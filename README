@@ -1,0 +1,36 @@
+# RANDOM_GAMEER - Minecraft survival bot (auto-join)
+
+Put your server IP in `config.json`, push to GitHub, and the bot joins by itself using GitHub Actions.
+
+## What the bot does (smart mode)
+It works through these stages in order, using its inventory to decide what is missing:
+1. **Wood** -> crafting table, wooden pickaxe / sword / axe
+2. **Stone** -> stone pickaxe / sword / axe, furnace
+3. **Food** -> hunts animals, cooks meat in a furnace
+4. **House** -> builds a 5x5 stone house with a roof, door and torch
+5. **Iron gear** -> mines iron, smelts it, crafts iron pickaxe, sword, full armor and a shield, then wears it
+6. Then it hangs around its house.
+
+While doing that it also:
+- jumps while it walks
+- eats food when hungry or hurt
+- fights mobs within 10 blocks and runs from creepers or when health is low
+- uses the best weapon it has (highest damage per second)
+- fights a **player** only if that player hit it 2+ times in a row **and** the bot wears full iron (or better) armor. Without iron armor it runs away instead
+- says `67` every 5 minutes
+- rejoins 2 seconds after any kick, and does `/register` / `/login` with the password in `config.json`
+
+Not built yet: diamonds and the Nether.
+
+## config.json
+- `serverIp`, `version` (use `1.21.11` for servers newer than 1.21.11 with ViaVersion)
+- `smartMode`: `false` = old simple mode (wander and fight mobs only)
+- `jumpWhileMoving`, `hitsToFight`, `botName`, `password`, `chatMessage`, `chatEveryMinutes`
+
+## Files to upload to GitHub
+`index.js`, `brain.js`, `skills.js`, `gear.js`, `config.json`, `package.json`, and `.github/workflows/bot.yml`
+
+## Notes
+- The name `RANDOM_GAMEER` only works on cracked / offline-mode servers.
+- GitHub Actions restarts the bot every 5 hours. The bot works from its inventory, so it carries on where it was. It finds its house again by the door.
+- Only use it on servers that allow bots. The bot mines and digs, so keep it away from builds you care about.
