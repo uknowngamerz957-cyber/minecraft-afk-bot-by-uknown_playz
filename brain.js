@@ -217,7 +217,19 @@ function startBrain(bot, cfg, log) {
     return m;
   }
 
+  let currentStage = 'starting';
+
   const STAGES = [
+    {
+      // emergency: low health/hunger and nothing to eat -> get food before anything else
+      name: 'emergency food',
+      done: () => gear.foodCount(bot) > 0 || (bot.food === undefined || bot.food >= 14) && bot.health > 8,
+      run: async () => {
+        await S.hunt(ctx, 3);
+        await S.cookMeat(ctx);
+        return gear.foodCount(bot) > 0;
+      },
+    },
     {
       name: 'wood + wooden pickaxe',
       done: () => S.toolTier(bot, 'pickaxe') >= 1,
@@ -335,6 +347,7 @@ function startBrain(bot, cfg, log) {
         const stage = STAGES.find((s) => !s.done() && !((skipUntil[s.name] || 0) > now));
         if (!stage) { await idleStep(); continue; }
         log(`Stage: ${stage.name}`);
+        currentStage = stage.name;
         const ok = await stage.run();
         if (ok) {
           fails[stage.name] = 0;
@@ -356,6 +369,13 @@ function startBrain(bot, cfg, log) {
       }
     }
   }
+
+  // one short status line every 30s so the log is easy to read
+  timers.push(setInterval(() => {
+    try {
+      log(`status | stage=${currentStage} | hp=${bot.health} food=${bot.food} | logs=${S.countWhere(bot, S.isLog)} planks=${S.countWhere(bot, S.isPlanks)} cobble=${S.countWhere(bot, S.isCobble)} meat=${gear.foodCount(bot)} | pick=${S.toolTier(bot, 'pickaxe')} sword=${S.toolTier(bot, 'sword')} ironArmor=${gear.hasIronArmor(bot) ? 'yes' : 'no'}`);
+    } catch (_) {}
+  }, 30000));
 
   mainLoop();
 
