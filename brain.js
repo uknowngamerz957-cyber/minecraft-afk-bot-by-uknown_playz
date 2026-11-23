@@ -1,10 +1,10 @@
-// brain.js - strict 6-stage pipeline:
-// 1) wood -> wooden_pickaxe
-// 2) 32 stone -> stone_axe, stone_sword, stone_pickaxe
-// 3) food + furnace + cook food
-// 4) find iron -> iron gear
-// 5) collect house materials
-// 6) diamond gear (nothing else)
+// brain.js - 3x fast strict 6-stage pipeline:
+// 1. wood -> wooden_pickaxe
+// 2. 32 stone -> stone_axe, stone_sword, stone_pickaxe
+// 3. food + furnace + cook food
+// 4. find iron -> iron gear
+// 5. collect house materials
+// 6. diamond gear
 
 const { Movements, goals } = require('mineflayer-pathfinder');
 const { Vec3 } = require('vec3');
@@ -30,7 +30,7 @@ const HOSTILE_NAMES = [
   'blaze', 'ghast', 'zombie_villager', 'silverfish', 'bogged', 'breeze',
 ];
 
-function createExpiringBadBlocks(ttlMs = 25000) {
+function createExpiringBadBlocks(ttlMs = 20000) {
   const map = new Map();
   return {
     has(k) {
@@ -56,13 +56,13 @@ function startBrain(bot, cfg, log) {
     .filter(Boolean)
     .map((i) => i.id);
   bot.pathfinder.setMovements(movements);
-  bot.pathfinder.thinkTimeout = 3000;
+  bot.pathfinder.thinkTimeout = 1200;
 
   const state = {
     combat: false,
     digging: false,
     stopped: false,
-    badBlocks: createExpiringBadBlocks(25000),
+    badBlocks: createExpiringBadBlocks(20000),
     rescue: false,
     waiting: false,
     houseMatsDone: false,
@@ -132,11 +132,7 @@ function startBrain(bot, cfg, log) {
 
   function aimSmooth(targetVec) {
     if (!bot || !bot.entity || !targetVec) return;
-    bot.lookAt(targetVec.offset(
-      (Math.random() - 0.5) * 0.1,
-      (Math.random() - 0.5) * 0.08,
-      (Math.random() - 0.5) * 0.1
-    ), false).catch(() => {});
+    bot.lookAt(targetVec, false).catch(() => {});
   }
 
   function stopMelee() {
@@ -184,7 +180,7 @@ function startBrain(bot, cfg, log) {
     bot.setControlState('forward', dist > 2.2);
     bot.setControlState('sprint', dist > 2.2);
     bot.setControlState('back', dist < 1.3);
-    if (dist < 3.3 && now - lastAttack > gear.weaponCooldown(bot) + 25) {
+    if (dist < 3.4 && now - lastAttack > gear.weaponCooldown(bot) + 10) {
       lastAttack = now;
       try { bot.attack(target); } catch (_) {}
     }
@@ -214,8 +210,8 @@ function startBrain(bot, cfg, log) {
     if (mob) {
       if (lowHealth) return flee(mob);
       if (!fightStart.has(mob.id)) fightStart.set(mob.id, now);
-      if (now - fightStart.get(mob.id) > 16000) {
-        ignore.set(mob.id, now + 25000);
+      if (now - fightStart.get(mob.id) > 14000) {
+        ignore.set(mob.id, now + 20000);
         fightStart.delete(mob.id);
         return;
       }
@@ -246,10 +242,10 @@ function startBrain(bot, cfg, log) {
         try {
           await bot.equip(item, 'hand');
           bot.setControlState('jump', true);
-          await S.sleep(140);
+          await S.sleep(80);
           await bot.placeBlock(below, new Vec3(0, 1, 0));
           bot.setControlState('jump', false);
-          await S.sleep(140);
+          await S.sleep(80);
           return true;
         } catch (_) {
           bot.setControlState('jump', false);
@@ -267,7 +263,7 @@ function startBrain(bot, cfg, log) {
       bot.setControlState('forward', true);
       bot.setControlState('sprint', true);
       bot.setControlState('jump', true);
-      await S.sleep(500);
+      await S.sleep(320);
       stopMelee();
       bot.setControlState('sprint', false);
       if (bot.entity.position.y > base.y + 0.4 || bot.entity.position.distanceTo(base.offset(0.5, 0, 0.5)) > 1.2) return true;
@@ -275,9 +271,9 @@ function startBrain(bot, cfg, log) {
     return false;
   }
 
-  timers.push(setInterval(combatTick, 350));
-  timers.push(setInterval(() => { gear.eatIfNeeded(bot).catch(() => {}); }, 1000));
-  timers.push(setInterval(() => { gear.equipBestArmor(bot).catch(() => {}); }, 5000));
+  timers.push(setInterval(combatTick, 200));
+  timers.push(setInterval(() => { gear.eatIfNeeded(bot).catch(() => {}); }, 600));
+  timers.push(setInterval(() => { gear.equipBestArmor(bot).catch(() => {}); }, 2500));
 
   let lastPos = null;
   let lastMoveAt = Date.now();
@@ -287,11 +283,11 @@ function startBrain(bot, cfg, log) {
       if (!bot.entity || state.stopped || bot.health <= 0 || state.rescue) return;
       const now = Date.now();
       const p = bot.entity.position;
-      if (!lastPos || p.distanceTo(lastPos) > 0.7) { lastPos = p.clone(); lastMoveAt = now; stuckCount = 0; return; }
+      if (!lastPos || p.distanceTo(lastPos) > 0.6) { lastPos = p.clone(); lastMoveAt = now; stuckCount = 0; return; }
       if (state.waiting || gear.isEating()) { lastMoveAt = now; return; }
       const inWater = S.isInWater(bot);
       const onLeaves = S.isOnLeaves(bot);
-      const limit = inWater || onLeaves ? 4000 : 7000;
+      const limit = inWater || onLeaves ? 2200 : 3500;
       if (now - lastMoveAt < limit) return;
       stuckCount++;
       lastMoveAt = Date.now();
@@ -311,13 +307,13 @@ function startBrain(bot, cfg, log) {
     } finally {
       state.rescue = false;
     }
-  }, 2000));
+  }, 1200));
 
   timers.push(setInterval(() => {
     const now = Date.now();
     for (const [id, t] of ignore) if (t < now) ignore.delete(id);
     if (state.badBlocks && typeof state.badBlocks.prune === 'function') state.badBlocks.prune();
-  }, 25000));
+  }, 20000));
 
   const have = (n) => S.itemCount(bot, n);
   const logsWorth = () => S.countWhere(bot, S.isLog) + Math.floor(S.countWhere(bot, S.isPlanks) / 4);
@@ -346,14 +342,13 @@ function startBrain(bot, cfg, log) {
     return m;
   }
 
-  // Strictly ordered 1 -> 2 -> 3 -> 4 -> 5 -> 6
   const STAGES = [
     {
       name: '1. wood + wooden pickaxe',
       done: () => S.toolTier(bot, 'pickaxe') >= 1,
       run: async () => {
         if (logsWorth() < 6) {
-          await S.collect(ctx, LOG_NAMES, 8, logsWorth, { canDig: true, maxAbove: 6, maxDistance: 40 });
+          await S.collect(ctx, LOG_NAMES, 8, logsWorth, { canDig: true, maxAbove: 6, maxDistance: 44 });
         }
         if (logsWorth() < 3) return false;
         const ok = await S.craftTool(ctx, 'wooden_pickaxe');
@@ -366,7 +361,7 @@ function startBrain(bot, cfg, log) {
       done: () => S.toolTier(bot, 'axe') >= 2 && S.toolTier(bot, 'sword') >= 2 && S.toolTier(bot, 'pickaxe') >= 2,
       run: async () => {
         if (stonePool() < 32) {
-          await S.collect(ctx, ['stone', 'cobblestone', 'cobbled_deepslate'], 32, stonePool, { maxDistance: 40 });
+          await S.collect(ctx, ['stone', 'cobblestone', 'cobbled_deepslate'], 32, stonePool, { maxDistance: 44 });
         }
         if (S.toolTier(bot, 'pickaxe') < 2) await S.craftTool(ctx, 'stone_pickaxe');
         if (S.toolTier(bot, 'axe') < 2) await S.craftTool(ctx, 'stone_axe');
@@ -384,7 +379,7 @@ function startBrain(bot, cfg, log) {
         }
         if (have('furnace') === 0) {
           if (stonePool() < 8) {
-            await S.collect(ctx, ['stone', 'cobblestone', 'cobbled_deepslate'], 8, stonePool, { maxDistance: 36 });
+            await S.collect(ctx, ['stone', 'cobblestone', 'cobbled_deepslate'], 8, stonePool, { maxDistance: 40 });
           }
           await S.craftTool(ctx, 'furnace');
         }
@@ -401,9 +396,9 @@ function startBrain(bot, cfg, log) {
         const stock = () => have('raw_iron') + have('iron_ingot');
         if (stock() < ingotsNeeded) {
           if (have('coal') + have('charcoal') < 4 && S.countWhere(bot, S.isLog) < 8) {
-            await S.collect(ctx, COAL_ORES, 4, () => have('coal'), { maxDistance: 48 });
+            await S.collect(ctx, COAL_ORES, 4, () => have('coal'), { maxDistance: 52 });
           }
-          await S.collect(ctx, IRON_ORES, ingotsNeeded, stock, { maxDistance: 72 });
+          await S.collect(ctx, IRON_ORES, ingotsNeeded, stock, { maxDistance: 76 });
         }
         if (have('raw_iron') > 0) await S.smelt(ctx, 'raw_iron', 'iron_ingot', have('raw_iron'));
         for (const name of missing) {
@@ -420,7 +415,7 @@ function startBrain(bot, cfg, log) {
       run: async () => {
         const haveMats = () => S.countWhere(bot, (n) => HOUSE_MAT_NAMES.includes(n));
         if (haveMats() < 48) {
-          await S.collect(ctx, ['stone', 'cobblestone', 'cobbled_deepslate', 'dirt'], 48, haveMats, { canDig: true, maxDistance: 40 });
+          await S.collect(ctx, ['stone', 'cobblestone', 'cobbled_deepslate', 'dirt'], 48, haveMats, { canDig: true, maxDistance: 44 });
         }
         if (haveMats() >= 48) {
           state.houseMatsDone = true;
@@ -437,7 +432,7 @@ function startBrain(bot, cfg, log) {
         const missing = missingDiamond();
         const diamondsNeeded = missing.reduce((sum, n) => sum + (S.COST[n] ? S.COST[n].diamond || 0 : 0), 0);
         if (have('diamond') < diamondsNeeded) {
-          await S.collect(ctx, DIAMOND_ORES, diamondsNeeded, () => have('diamond'), { maxDistance: 80 });
+          await S.collect(ctx, DIAMOND_ORES, diamondsNeeded, () => have('diamond'), { maxDistance: 84 });
         }
         for (const name of missing) {
           if (have('diamond') >= (S.COST[name].diamond || 0)) await S.craftTool(ctx, name);
@@ -452,17 +447,16 @@ function startBrain(bot, cfg, log) {
   let currentStage = '1. wood + wooden pickaxe';
 
   async function mainLoop() {
-    try { if (bot.waitForChunksToLoad) await Promise.race([bot.waitForChunksToLoad(), S.sleep(8000)]); } catch (_) {}
-    await S.sleep(300);
-    log('Strict 6-stage brain started');
+    try { if (bot.waitForChunksToLoad) await Promise.race([bot.waitForChunksToLoad(), S.sleep(4000)]); } catch (_) {}
+    await S.sleep(100);
+    log('3x fast strict 6-stage brain started');
     while (!state.stopped) {
       try {
-        if (!bot.entity || bot.health <= 0) { await S.sleep(1500); continue; }
-        // Always pick the FIRST incomplete stage in order (no skipping ahead)
+        if (!bot.entity || bot.health <= 0) { await S.sleep(600); continue; }
         const stage = STAGES.find((s) => !s.done());
         if (!stage) {
           log('All 6 stages complete');
-          await S.sleep(5000);
+          await S.sleep(3000);
           continue;
         }
         currentStage = stage.name;
@@ -470,12 +464,12 @@ function startBrain(bot, cfg, log) {
         const ok = await stage.run();
         if (!ok) {
           await climbOutOfHole();
-          await S.explore(ctx, 20);
+          await S.explore(ctx, 18);
         }
       } catch (e) {
         if (e && e.message === 'STOPPED') return;
         log(`Error: ${e && e.stack ? e.stack.split('\n').slice(0, 2).join(' | ') : e}`);
-        await S.sleep(1500);
+        await S.sleep(600);
       }
     }
   }
@@ -484,7 +478,7 @@ function startBrain(bot, cfg, log) {
     try {
       log(`status | stage=${currentStage} | hp=${bot.health} food=${bot.food} | logs=${S.countWhere(bot, S.isLog)} stone=${stonePool()} iron=${have('iron_ingot') + have('raw_iron')} dia=${have('diamond')} | axe=${S.toolTier(bot, 'axe')} sword=${S.toolTier(bot, 'sword')} pick=${S.toolTier(bot, 'pickaxe')}`);
     } catch (_) {}
-  }, 25000));
+  }, 15000));
 
   mainLoop();
 
