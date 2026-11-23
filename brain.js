@@ -1,19 +1,19 @@
-// brain.js - the "player" brain.
-//  * fights mobs within 10 blocks, runs from creepers
-//  * fights a player only if they hit it 2+ times AND it wears full iron armor (else it runs away)
-//  * eats food, equips the best armor and weapon
-//  * jumps while moving with smoother, more human-like pacing
-//  * works through stages: wood -> stone tools -> food -> house -> iron gear
+// brain.js - full progression brain:
+// wood -> stone tools -> food -> base/house -> iron gear -> diamond gear -> enchanting
 
 const { Movements, goals } = require('mineflayer-pathfinder');
 const gear = require('./gear');
 const S = require('./skills');
 
-const ATTACK_RANGE = 10; // mobs closer than this get attacked
+const ATTACK_RANGE = 10;
 const CREEPER_FLEE_DIST = 7;
 const FLEE_HEALTH = 8;
-const LOG_NAMES = ['oak_log', 'birch_log', 'spruce_log', 'jungle_log', 'acacia_log', 'dark_oak_log', 'mangrove_log', 'cherry_log', 'pale_oak_log'];
+const LOG_NAMES = [
+  'oak_log', 'birch_log', 'spruce_log', 'jungle_log',
+  'acacia_log', 'dark_oak_log', 'mangrove_log', 'cherry_log', 'pale_oak_log',
+];
 const IRON_ORES = ['iron_ore', 'deepslate_iron_ore'];
+const DIAMOND_ORES = ['diamond_ore', 'deepslate_diamond_ore'];
 const COAL_ORES = ['coal_ore', 'deepslate_coal_ore'];
 const HOSTILE_NAMES = [
   'zombie', 'skeleton', 'creeper', 'spider', 'cave_spider', 'witch', 'enderman', 'husk', 'stray', 'drowned',
@@ -35,12 +35,6 @@ function createExpiringBadBlocks(ttlMs = 60000) {
     add(k) {
       map.set(k, Date.now() + ttlMs);
     },
-    delete(k) {
-      return map.delete(k);
-    },
-    clear() {
-      map.clear();
-    },
     prune() {
       const now = Date.now();
       for (const [k, exp] of map) {
@@ -54,7 +48,7 @@ function startBrain(bot, cfg, log) {
   const movements = new Movements(bot);
   movements.canDig = false;
   bot.pathfinder.setMovements(movements);
-  bot.pathfinder.thinkTimeout = 4000; // give up on impossible paths faster
+  bot.pathfinder.thinkTimeout = 4000;
 
   const state = {
     combat: false,
@@ -63,23 +57,23 @@ function startBrain(bot, cfg, log) {
     badBlocks: createExpiringBadBlocks(60000),
     home: null,
     houseBuilt: false,
-    rescue: false, // true while getting out of water / off a tree / unstuck
-    waiting: false, // true while standing still on purpose (smelting)
-    loot: null, // where I died, so I can go get my stuff
+    enchantedDone: false,
+    rescue: false,
+    waiting: false,
+    loot: null,
   };
   const ctx = { bot, log, movements, state };
 
   const HITS_TO_FIGHT = cfg.hitsToFight || 2;
   const timers = [];
-  const ignore = new Map(); // mob id -> ignore until (ms)
-  const fightStart = new Map(); // mob id -> when we started chasing it
-  const hits = new Map(); // player name -> [timestamps]
-  let enemy = null; // { name, until }
+  const ignore = new Map();
+  const fightStart = new Map();
+  const hits = new Map();
+  let enemy = null;
   let followId = null;
   let lastAttack = 0;
   let lastHealth = bot.health;
 
-  // ---------------- finding things ----------------
   function isHostile(e) {
     if (!e || !e.position || e === bot.entity) return false;
     if (e.type === 'player') return false;
@@ -113,7 +107,6 @@ function startBrain(bot, cfg, log) {
     return best;
   }
 
-  // ---------------- being hit by a player ----------------
   bot.on('health', () => {
     try {
       if (bot.health < lastHealth) {
@@ -124,16 +117,17 @@ function startBrain(bot, cfg, log) {
           list.push(now);
           hits.set(attacker.username, list);
           if (list.length >= HITS_TO_FIGHT || (enemy && enemy.name === attacker.username)) {
-            if (!enemy || enemy.name !== attacker.username) log(`${attacker.username} hit me ${list.length}x, they are an enemy now`);
+            if (!enemy || enemy.name !== attacker.username) {
+              log(`${attacker.username} hit me ${list.length}x, they are an enemy now`);
+            }
             enemy = { name: attacker.username, until: now + 60000 };
           }
         }
       }
-    } catch (_) { /* never crash on health events */ }
+    } catch (_) {}
     lastHealth = bot.health;
   });
 
-  // ---------------- combat actions ----------------
   async function humanLookAt(targetVec) {
     if (!bot || !bot.entity || !targetVec) return;
     const jittered = targetVec.offset(
@@ -141,12 +135,9 @@ function startBrain(bot, cfg, log) {
       (Math.random() - 0.5) * 0.12,
       (Math.random() - 0.5) * 0.14
     );
-    try {
-      await bot.lookAt(jittered, false);
-    } catch (_) {}
+    try { await bot.lookAt(jittered, false); } catch (_) {}
   }
 
-  // ---- shield (off-hand): raise it while fighting, lower it otherwise ----
   function hasShield() {
     try {
       const o = bot.inventory.slots[bot.getEquipmentDestSlot('off-hand')];
@@ -167,7 +158,6 @@ function startBrain(bot, cfg, log) {
     if (s) { try { await bot.equip(s, 'off-hand'); } catch (_) {} }
   }
 
-  // ---- steering ----
   let strafeDir = 1;
   let strafeUntil = 0;
   let lastFleeSet = 0;
@@ -193,8 +183,6 @@ function startBrain(bot, cfg, log) {
     }
   }
 
-  // PvP / mob fighting that keeps MOVING: chase when far, then walk at the target,
-  // back off when too close, strafe left/right, hop now and then, keep the shield up.
   function fight(target) {
     state.combat = true;
     if (gear.isEating()) {
@@ -250,7 +238,6 @@ function startBrain(bot, cfg, log) {
     const now = Date.now();
     const lowHealth = bot.health !== undefined && bot.health <= FLEE_HEALTH;
 
-    // 1) an enemy player
     if (enemy && now > enemy.until) enemy = null;
     if (enemy) {
       const rec = bot.players[enemy.name];
@@ -262,11 +249,9 @@ function startBrain(bot, cfg, log) {
       enemy = null;
     }
 
-    // 2) creepers explode, never melee them
     const close = nearestHostile(CREEPER_FLEE_DIST);
     if (close && close.name === 'creeper') return flee(close);
 
-    // 3) mobs within 10 blocks
     const mob = nearestHostile(ATTACK_RANGE);
     if (mob) {
       if (lowHealth) return flee(mob);
@@ -279,7 +264,6 @@ function startBrain(bot, cfg, log) {
       return fight(mob);
     }
 
-    // 4) all clear
     if (state.combat) {
       state.combat = false;
       followId = null;
@@ -290,14 +274,12 @@ function startBrain(bot, cfg, log) {
     }
   }
 
-  // ---------------- background upkeep ----------------
   timers.push(setInterval(combatTick, 400));
   timers.push(setInterval(() => { gear.eatIfNeeded(bot).catch(() => {}); }, 1200));
   timers.push(setInterval(() => {
     gear.equipBestArmor(bot).then(() => equipShield()).catch(() => {});
   }, 6000));
 
-  // stuck detector: no real movement for 15s while NOT busy on purpose -> get free
   let lastPos = null;
   let lastMoveAt = Date.now();
   let stuckCount = 0;
@@ -341,7 +323,6 @@ function startBrain(bot, cfg, log) {
     if (state.badBlocks && typeof state.badBlocks.prune === 'function') state.badBlocks.prune();
   }, 30000));
 
-  // smoother, human-like jump while moving (avoids low ceilings and constant hopping)
   if (cfg.jumpWhileMoving !== false) {
     timers.push(setInterval(() => {
       try {
@@ -381,7 +362,17 @@ function startBrain(bot, cfg, log) {
     if (S.toolTier(bot, 'pickaxe') < 3) m.push('iron_pickaxe');
     if (S.toolTier(bot, 'sword') < 3) m.push('iron_sword');
     for (const piece of ['helmet', 'chestplate', 'leggings', 'boots']) {
-      if (!S.hasArmorPiece(bot, piece)) m.push('iron_' + piece);
+      if (!S.hasArmorPiece(bot, piece, 3)) m.push('iron_' + piece);
+    }
+    return m;
+  }
+
+  function missingDiamond() {
+    const m = [];
+    if (S.toolTier(bot, 'pickaxe') < 4) m.push('diamond_pickaxe');
+    if (S.toolTier(bot, 'sword') < 4) m.push('diamond_sword');
+    for (const piece of ['helmet', 'chestplate', 'leggings', 'boots']) {
+      if (!S.hasArmorPiece(bot, piece, 4)) m.push('diamond_' + piece);
     }
     return m;
   }
@@ -465,14 +456,14 @@ function startBrain(bot, cfg, log) {
       },
     },
     {
-      name: 'house',
+      name: 'base house',
       done: () => state.houseBuilt,
       run: async () => {
         const door = S.findExistingDoor(bot);
         if (door) {
           state.home = door.position;
           state.houseBuilt = true;
-          log('Found my house (a door nearby), skipping building');
+          log('Found my base (a door nearby), skipping building');
           return true;
         }
         await S.collect(ctx, ['stone'], 80, () => S.buildCount(bot), { maxDistance: 48 });
@@ -483,12 +474,12 @@ function startBrain(bot, cfg, log) {
         await S.ensurePlanks(ctx, 6).catch(() => {});
         const site = S.findBuildSite(bot);
         if (!site) return false;
-        log(`Building a house at ${site.x}, ${site.y + 1}, ${site.z}`);
+        log(`Building base house at ${site.x}, ${site.y + 1}, ${site.z}`);
         const ok = await S.buildHouse(ctx, site);
         if (ok) {
           state.home = bot.entity.position.clone();
           state.houseBuilt = true;
-          log('House finished');
+          log('Base house finished');
         }
         return ok;
       },
@@ -498,7 +489,7 @@ function startBrain(bot, cfg, log) {
       done: () => missingIron().length === 0,
       run: async () => {
         const missing = missingIron();
-        const ingotsNeeded = missing.reduce((sum, n) => sum + S.COST[n].iron, 0) + (have('shield') ? 0 : 1);
+        const ingotsNeeded = missing.reduce((sum, n) => sum + (S.COST[n] ? S.COST[n].iron || 0 : 0), 0) + (have('shield') ? 0 : 1);
         const stock = () => have('raw_iron') + have('iron_ingot');
         if (stock() < ingotsNeeded) {
           if (have('coal') + have('charcoal') < 4 && S.countWhere(bot, S.isLog) < 12) {
@@ -509,12 +500,46 @@ function startBrain(bot, cfg, log) {
         }
         if (have('raw_iron') > 0) await S.smelt(ctx, 'raw_iron', 'iron_ingot', have('raw_iron'));
         for (const name of missing) {
-          if (have('iron_ingot') >= S.COST[name].iron) await S.craftTool(ctx, name);
+          if (have('iron_ingot') >= (S.COST[name].iron || 0)) await S.craftTool(ctx, name);
         }
         if (have('shield') === 0 && have('iron_ingot') >= 1) await S.craftTool(ctx, 'shield');
         await gear.equipBestArmor(bot);
+        await gear.equipBestWeapon(bot);
         await equipShield();
         return missingIron().length === 0;
+      },
+    },
+    {
+      name: 'diamond gear',
+      done: () => missingDiamond().length === 0,
+      run: async () => {
+        if (S.toolTier(bot, 'pickaxe') < 3) return false;
+        const missing = missingDiamond();
+        const diamondsNeeded = missing.reduce((sum, n) => sum + (S.COST[n] ? S.COST[n].diamond || 0 : 0), 0);
+        if (have('diamond') < diamondsNeeded) {
+          await S.collect(ctx, DIAMOND_ORES, diamondsNeeded, () => have('diamond'), { maxDistance: 110 });
+        }
+        for (const name of missing) {
+          if (have('diamond') >= (S.COST[name].diamond || 0)) {
+            await S.craftTool(ctx, name);
+          }
+        }
+        await gear.equipBestArmor(bot);
+        await gear.equipBestWeapon(bot);
+        return missingDiamond().length === 0;
+      },
+    },
+    {
+      name: 'enchant gear',
+      done: () => state.enchantedDone,
+      run: async () => {
+        const ok = await S.enchantGear(ctx);
+        if (ok) {
+          state.enchantedDone = true;
+          await gear.equipBestArmor(bot);
+          await gear.equipBestWeapon(bot);
+        }
+        return ok;
       },
     },
   ];
@@ -534,7 +559,7 @@ function startBrain(bot, cfg, log) {
   async function mainLoop() {
     try { if (bot.waitForChunksToLoad) await Promise.race([bot.waitForChunksToLoad(), S.sleep(10000)]); } catch (_) {}
     await S.sleep(500);
-    log('Brain started. Working through: wood -> stone -> food -> house -> iron gear');
+    log('Brain started: wood -> stone -> food -> base -> iron -> diamond -> enchant');
     while (!state.stopped) {
       try {
         if (!bot.entity || bot.health <= 0) { await S.sleep(2000); continue; }
@@ -571,7 +596,7 @@ function startBrain(bot, cfg, log) {
 
   timers.push(setInterval(() => {
     try {
-      log(`status | stage=${currentStage} | hp=${bot.health} food=${bot.food} | logs=${S.countWhere(bot, S.isLog)} planks=${S.countWhere(bot, S.isPlanks)} cobble=${S.countWhere(bot, S.isCobble)} meat=${gear.foodCount(bot)} | pick=${S.toolTier(bot, 'pickaxe')} sword=${S.toolTier(bot, 'sword')} ironArmor=${gear.hasIronArmor(bot) ? 'yes' : 'no'}`);
+      log(`status | stage=${currentStage} | hp=${bot.health} food=${bot.food} | logs=${S.countWhere(bot, S.isLog)} cobble=${S.countWhere(bot, S.isCobble)} iron=${have('iron_ingot') + have('raw_iron')} dia=${have('diamond')} | pick=${S.toolTier(bot, 'pickaxe')} sword=${S.toolTier(bot, 'sword')} diaArmor=${gear.hasDiamondArmor(bot) ? 'yes' : 'no'}`);
     } catch (_) {}
   }, 30000));
 
