@@ -1,4 +1,4 @@
-// skills.js - 3x fast mining, crafting, smelting, hunting & unstuck
+// skills.js - fast wood/block breaking + direct drop pickup + crafting
 const { goals } = require('mineflayer-pathfinder');
 const { Vec3 } = require('vec3');
 const gear = require('./gear');
@@ -132,18 +132,35 @@ async function explore(ctx, dist = 24) {
   return gotoGoal(ctx, new goals.GoalXZ(gx, gz), 6000);
 }
 
-async function pickupDrops(ctx, radius = 9) {
+// Direct walk + jump to pick up nearby dropped items reliably
+async function pickupDrops(ctx, radius = 10) {
   const { bot } = ctx;
-  for (let i = 0; i < 3; i++) {
+  try { bot.pathfinder.setGoal(null); } catch (_) {}
+  for (let pass = 0; pass < 5; pass++) {
+    check(ctx);
+    if (!bot.entity) return;
     const me = bot.entity.position;
     const items = Object.values(bot.entities)
-      .filter((e) => e && e.position && (e.name === 'item' || e.displayName === 'Item'))
-      .filter((e) => e.position.distanceTo(me) < radius)
+      .filter((e) => e && e.isValid !== false && e.position && (e.name === 'item' || e.displayName === 'Item'))
+      .filter((e) => e.position.distanceTo(me) <= radius)
       .sort((a, b) => a.position.distanceTo(me) - b.position.distanceTo(me));
     if (!items.length) return;
-    const t = items[0].position;
-    await gotoGoal(ctx, new goals.GoalNear(t.x, t.y, t.z, 1.0), 2500);
-    await sleep(20);
+
+    const target = items[0];
+    const t0 = Date.now();
+    while (bot.entities[target.id] && Date.now() - t0 < 1400) {
+      check(ctx);
+      const curPos = bot.entity.position;
+      const d = target.position.distanceTo(curPos);
+      if (d < 1.1) break;
+      await humanLookAt(bot, target.position.offset(0, 0.3, 0));
+      bot.setControlState('forward', true);
+      bot.setControlState('sprint', true);
+      bot.setControlState('jump', target.position.y > curPos.y + 0.35 || d > 2.2);
+      await sleep(70);
+    }
+    for (const c of ['forward', 'sprint', 'jump']) bot.setControlState(c, false);
+    await sleep(90);
   }
 }
 
@@ -170,14 +187,14 @@ async function mineBlock(ctx, block, opts = {}) {
   const key = p.toString();
   const eye = bot.entity.position.offset(0, bot.entity.height || 1.62, 0);
   let ok = true;
-  if (eye.distanceTo(p.offset(0.5, 0.5, 0.5)) > 4.8) {
+  if (eye.distanceTo(p.offset(0.5, 0.5, 0.5)) > 4.6) {
     ctx.movements.canDig = opts.canDig !== false;
-    ok = await gotoGoal(ctx, new goals.GoalNear(p.x, p.y, p.z, 3.2), 5500);
+    ok = await gotoGoal(ctx, new goals.GoalNear(p.x, p.y, p.z, 2.8), 5500);
     ctx.movements.canDig = false;
   }
   const target = bot.blockAt(p);
   if (!target || target.type !== block.type) return true;
-  if (!ok && bot.entity.position.offset(0, bot.entity.height || 1.62, 0).distanceTo(p.offset(0.5, 0.5, 0.5)) > 5.6) {
+  if (!ok && bot.entity.position.offset(0, bot.entity.height || 1.62, 0).distanceTo(p.offset(0.5, 0.5, 0.5)) > 5.5) {
     markBad(state, key);
     return false;
   }
@@ -189,6 +206,8 @@ async function mineBlock(ctx, block, opts = {}) {
   try {
     state.digging = true;
     await bot.dig(target, true);
+    await sleep(160);
+    await pickupDrops(ctx, 10);
     return true;
   } catch (_) {
     markBad(state, key);
@@ -208,7 +227,7 @@ async function collect(ctx, names, want, haveFn, opts = {}) {
   while (haveFn() < want) {
     check(ctx);
     if (fails >= 6 || explores >= 4) {
-      await pickupDrops(ctx, 9);
+      await pickupDrops(ctx, 10);
       await cleanInventoryIfNeeded(ctx);
       return haveFn() >= want;
     }
@@ -220,7 +239,7 @@ async function collect(ctx, names, want, haveFn, opts = {}) {
       .filter((pos) => opts.maxAbove === undefined || pos.y - me.y <= opts.maxAbove)
       .sort((a, b) => a.distanceTo(me) - b.distanceTo(me));
     if (!found.length) {
-      await pickupDrops(ctx, 9);
+      await pickupDrops(ctx, 10);
       explores++;
       await explore(ctx, 24);
       continue;
@@ -230,16 +249,16 @@ async function collect(ctx, names, want, haveFn, opts = {}) {
     if (await mineBlock(ctx, block, opts)) {
       fails = 0;
       dug++;
-      if (dug >= 12 || haveFn() >= want) {
+      if (dug >= 6 || haveFn() >= want) {
         dug = 0;
-        await pickupDrops(ctx, 9);
+        await pickupDrops(ctx, 10);
         await cleanInventoryIfNeeded(ctx);
       }
     } else {
       fails++;
     }
   }
-  await pickupDrops(ctx, 9);
+  await pickupDrops(ctx, 10);
   await cleanInventoryIfNeeded(ctx);
   return true;
 }
@@ -333,173 +352,4 @@ async function craftTool(ctx, name) {
   if (cost.sticks && !(await ensureSticks(ctx, cost.sticks))) return false;
   if (cost.planks && !(await ensurePlanks(ctx, cost.planks))) return false;
   const table = await getTable(ctx);
-  return table ? craftRaw(ctx, name, table, 1) : false;
-}
-
-async function getFurnace(ctx) {
-  const def = ctx.bot.registry.blocksByName.furnace;
-  if (!def) return null;
-  let f = ctx.bot.findBlock({ matching: def.id, maxDistance: 24 });
-  if (!f) {
-    if (itemCount(ctx.bot, 'furnace') === 0 && !(await craftTool(ctx, 'furnace'))) return null;
-    f = await placeBlockNearby(ctx, 'furnace');
-    if (!f) return null;
-  }
-  if (ctx.bot.entity.position.distanceTo(f.position) > 3.5) {
-    await gotoGoal(ctx, new goals.GoalNear(f.position.x, f.position.y, f.position.z, 2.2), 5000);
-  }
-  return f;
-}
-
-async function smelt(ctx, inputName, outputName, want) {
-  const { bot, log } = ctx;
-  const inItem = bot.registry.itemsByName[inputName];
-  const outItem = bot.registry.itemsByName[outputName];
-  if (!inItem || !outItem) return false;
-  const total = Math.min(itemCount(bot, inputName), want);
-  if (total <= 0) return false;
-  let fuel = bot.inventory.items().find((i) => i.name === 'coal' || i.name === 'charcoal');
-  let fuelCount = 0;
-  if (fuel && fuel.count * 8 >= total) {
-    fuelCount = Math.ceil(total / 8);
-  } else {
-    fuel = bot.inventory.items().find((i) => isLog(i.name)) || bot.inventory.items().find((i) => isPlanks(i.name));
-    if (fuel) fuelCount = Math.min(fuel.count, Math.ceil(total / 1.5));
-  }
-  if (!fuel || fuelCount <= 0) { log('no fuel'); return false; }
-  const fb = await getFurnace(ctx);
-  if (!fb) return false;
-  const startOut = itemCount(bot, outputName);
-  let furnace = await bot.openFurnace(fb);
-  try {
-    await furnace.putFuel(fuel.type, null, fuelCount);
-    await furnace.putInput(inItem.id, null, total);
-  } finally {
-    furnace.close();
-  }
-  const deadline = Date.now() + total * 11000 + 15000;
-  ctx.state.waiting = true;
-  try {
-    while (itemCount(bot, outputName) - startOut < total && Date.now() < deadline) {
-      check(ctx);
-      await sleep(3000);
-      await waitNoCombat(ctx);
-      if (bot.entity.position.distanceTo(fb.position) > 4) {
-        await gotoGoal(ctx, new goals.GoalNear(fb.position.x, fb.position.y, fb.position.z, 2.2), 5000);
-      }
-      try {
-        furnace = await bot.openFurnace(fb);
-        try { if (furnace.outputItem()) await furnace.takeOutput(); } finally { furnace.close(); }
-      } catch (_) {}
-    }
-  } finally {
-    ctx.state.waiting = false;
-  }
-  return itemCount(bot, outputName) - startOut >= total;
-}
-
-async function hunt(ctx, wantFood) {
-  const { bot } = ctx;
-  let attempts = 0;
-  while (gear.foodCount(bot) < wantFood && attempts < 8) {
-    check(ctx);
-    await waitNoCombat(ctx);
-    const me = bot.entity.position;
-    const nearMobs = Object.values(bot.entities).filter((e) => e && e.position && ANIMALS.has(e.name));
-    nearMobs.sort((a, b) => a.position.distanceTo(me) - b.position.distanceTo(me));
-    const animal = nearMobs.find((e) => e.position.distanceTo(me) < 64);
-    if (!animal) {
-      attempts++;
-      await explore(ctx, 26);
-      continue;
-    }
-    attempts++;
-    await gear.equipBestWeapon(bot);
-    const t0 = Date.now();
-    let lastHit = 0;
-    let following = false;
-    while (bot.entities[animal.id] && Date.now() - t0 < 14000) {
-      check(ctx);
-      await waitNoCombat(ctx);
-      if (bot.entity.position.distanceTo(animal.position) > 3.2) {
-        if (!following) {
-          bot.pathfinder.setGoal(new goals.GoalFollow(animal, 2), true);
-          following = true;
-        }
-      } else if (Date.now() - lastHit > gear.weaponCooldown(bot) + 15) {
-        lastHit = Date.now();
-        try {
-          await humanLookAt(bot, animal.position.offset(0, animal.height * 0.7, 0));
-          bot.attack(animal);
-        } catch (_) {}
-      }
-      await sleep(50);
-    }
-    bot.pathfinder.setGoal(null);
-    await sleep(50);
-    await pickupDrops(ctx, 9);
-    await cleanInventoryIfNeeded(ctx);
-  }
-  return gear.foodCount(bot) >= wantFood;
-}
-
-async function cookMeat(ctx) {
-  for (const [raw, cooked] of MEAT) {
-    const n = itemCount(ctx.bot, raw);
-    if (n >= 1) {
-      try { await smelt(ctx, raw, cooked, n); } catch (e) { ctx.log(`cook ${raw}: ${e.message}`); }
-    }
-  }
-}
-
-const isInWater = (bot) => {
-  const f = bot.blockAt(bot.entity.position.floored());
-  return !!bot.entity.isInWater || !!(f && LIQUIDS.includes(f.name));
-};
-const isOnLeaves = (bot) => {
-  const b = bot.blockAt(bot.entity.position.offset(0, -0.5, 0).floored());
-  return !!(b && /leaves/.test(b.name));
-};
-
-async function escapeWater(ctx) {
-  for (let i = 0; i < 6; i++) {
-    check(ctx);
-    if (!isInWater(ctx.bot)) return true;
-    try { await ctx.bot.look(Math.random() * Math.PI * 2, 0, false); } catch (_) {}
-    for (const c of ['forward', 'sprint', 'jump']) ctx.bot.setControlState(c, true);
-    await sleep(550);
-    for (const c of ['forward', 'sprint', 'jump']) ctx.bot.setControlState(c, false);
-  }
-  return !isInWater(ctx.bot);
-}
-
-async function descendFromLeaves(ctx) {
-  for (let i = 0; i < 18; i++) {
-    check(ctx);
-    const b = ctx.bot.blockAt(ctx.bot.entity.position.offset(0, -0.5, 0).floored());
-    if (!b) return false;
-    if (/leaves/.test(b.name)) {
-      await equipBestToolFor(ctx.bot, b);
-      try { ctx.state.digging = true; await ctx.bot.dig(b, true); } catch (_) {} finally { ctx.state.digging = false; }
-      await sleep(50);
-      continue;
-    }
-    if (b.boundingBox === 'block') return true;
-    await sleep(50);
-  }
-  return false;
-}
-
-async function wiggle(ctx) {
-  try { await ctx.bot.look(Math.random() * Math.PI * 2, 0, false); } catch (_) {}
-  for (const c of ['forward', 'jump', 'sprint']) ctx.bot.setControlState(c, true);
-  await sleep(500);
-  for (const c of ['forward', 'jump', 'sprint']) ctx.bot.setControlState(c, false);
-}
-
-module.exports = {
-  isInWater, isOnLeaves, escapeWater, descendFromLeaves, wiggle, sleep, check, itemCount, countWhere,
-  isLog, isPlanks, isCobble, toolTier, hasArmorPiece, cleanInventoryIfNeeded, waitNoCombat, gotoGoal,
-  explore, pickupDrops, collect, mineBlock, craftTool, getTable, craftRaw, ensurePlanks, smelt, hunt, cookMeat,
-  COST, BUILD_BLOCKS,
-};
+  return table ? craftRaw(ctx, name, table, 1)
