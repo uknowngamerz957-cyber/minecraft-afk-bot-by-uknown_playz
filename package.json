@@ -1,13 +1,14 @@
 {
   "name": "random-gameer-bot",
-  "version": "2.0.0",
-  "description": "Minecraft AFK bot RANDOM_GAMEER - auto joins the server in config.json",
+  "version": "3.0.0",
+  "description": "Minecraft bot RANDOM_GAMEER - auto joins, gathers, crafts, builds a house, gears up and fights back",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
     "mineflayer": "^4.35.0",
-    "mineflayer-pathfinder": "^2.4.5"
+    "mineflayer-pathfinder": "^2.4.5",
+    "vec3": "^0.1.10"
   }
 }
