@@ -1,4 +1,4 @@
-// skills.js - fast wood/block breaking + direct drop pickup + crafting
+// skills.js - fast mining, chest looting, haybale->bread, full crafting, smelting, hunting & unstuck
 const { goals } = require('mineflayer-pathfinder');
 const { Vec3 } = require('vec3');
 const gear = require('./gear');
@@ -25,15 +25,25 @@ const JUNK = new Set([
   'short_grass', 'tall_grass', 'fern', 'large_fern', 'poppy', 'dandelion',
 ]);
 const COST = {
+  planks: {},
+  stick: { planks: 1 },
+  crafting_table: { planks: 4 },
+  chest: { planks: 8 },
+  torch: { sticks: 1 },
+  bread: {},
+  shield: { iron: 1, planks: 6 },
   wooden_pickaxe: { planks: 3, sticks: 2 },
   wooden_axe: { planks: 3, sticks: 2 },
   wooden_sword: { planks: 2, sticks: 1 },
+  wooden_shovel: { planks: 1, sticks: 2 },
   stone_pickaxe: { cobble: 3, sticks: 2 },
   stone_axe: { cobble: 3, sticks: 2 },
   stone_sword: { cobble: 2, sticks: 1 },
+  stone_shovel: { cobble: 1, sticks: 2 },
   iron_pickaxe: { iron: 3, sticks: 2 },
   iron_axe: { iron: 3, sticks: 2 },
   iron_sword: { iron: 2, sticks: 1 },
+  iron_shovel: { iron: 1, sticks: 2 },
   iron_helmet: { iron: 5 },
   iron_chestplate: { iron: 8 },
   iron_leggings: { iron: 7 },
@@ -41,6 +51,7 @@ const COST = {
   diamond_pickaxe: { diamond: 3, sticks: 2 },
   diamond_axe: { diamond: 3, sticks: 2 },
   diamond_sword: { diamond: 2, sticks: 1 },
+  diamond_shovel: { diamond: 1, sticks: 2 },
   diamond_helmet: { diamond: 5 },
   diamond_chestplate: { diamond: 8 },
   diamond_leggings: { diamond: 7 },
@@ -48,6 +59,7 @@ const COST = {
   furnace: { cobble: 8 },
 };
 const LIQUIDS = ['water', 'lava'];
+const checkedChests = new Set();
 
 const check = (ctx) => { if (ctx.state.stopped) throw new Error('STOPPED'); };
 const hasBad = (st, k) => !!(st && st.badBlocks && st.badBlocks.has(k));
@@ -132,7 +144,6 @@ async function explore(ctx, dist = 24) {
   return gotoGoal(ctx, new goals.GoalXZ(gx, gz), 6000);
 }
 
-// Direct walk + jump to pick up nearby dropped items reliably
 async function pickupDrops(ctx, radius = 10) {
   const { bot } = ctx;
   try { bot.pathfinder.setGoal(null); } catch (_) {}
@@ -160,7 +171,7 @@ async function pickupDrops(ctx, radius = 10) {
       await sleep(70);
     }
     for (const c of ['forward', 'sprint', 'jump']) bot.setControlState(c, false);
-    await sleep(90);
+    await sleep(80);
   }
 }
 
@@ -206,7 +217,7 @@ async function mineBlock(ctx, block, opts = {}) {
   try {
     state.digging = true;
     await bot.dig(target, true);
-    await sleep(160);
+    await sleep(140);
     await pickupDrops(ctx, 10);
     return true;
   } catch (_) {
@@ -263,93 +274,52 @@ async function collect(ctx, names, want, haveFn, opts = {}) {
   return true;
 }
 
-async function placeBlockNearby(ctx, itemName) {
-  const { bot } = ctx;
-  const item = bot.inventory.items().find((i) => i.name === itemName);
-  if (!item) return null;
-  try { await bot.equip(item, 'hand'); } catch (_) { return null; }
-  const base = bot.entity.position.floored();
-  const offs = [
-    [1, 0], [-1, 0], [0, 1], [0, -1],
-    [1, 1], [-1, -1], [1, -1], [-1, 1],
-    [2, 0], [-2, 0], [0, 2], [0, -2],
-  ];
-  for (const [dx, dz] of offs) {
-    for (const dy of [0, -1, 1]) {
-      const target = base.offset(dx, dy, dz);
-      const below = bot.blockAt(target.offset(0, -1, 0));
-      const at = bot.blockAt(target);
-      if (below && below.boundingBox === 'block' && at && (at.name === 'air' || at.name === 'cave_air' || /grass|fern|flower|sapling/.test(at.name))) {
+// ---------- chest looting (village & nearby chests) ----------
+async function lootChests(ctx, maxDist = 48, maxChests = 6) {
+  const { bot, log } = ctx;
+  const chestIds = ['chest', 'trapped_chest', 'barrel']
+    .map((n) => bot.registry.blocksByName[n])
+    .filter(Boolean)
+    .map((b) => b.id);
+  if (!chestIds.length) return false;
+
+  let looted = 0;
+  for (let i = 0; i < maxChests; i++) {
+    check(ctx);
+    await waitNoCombat(ctx);
+    const me = bot.entity.position;
+    const positions = bot
+      .findBlocks({ matching: chestIds, maxDistance: maxDist, count: 32 })
+      .filter((p) => !checkedChests.has(p.toString()))
+      .sort((a, b) => a.distanceTo(me) - b.distanceTo(me));
+    if (!positions.length) break;
+
+    const pos = positions[0];
+    checkedChests.add(pos.toString());
+    if (bot.entity.position.distanceTo(pos) > 3.5) {
+      await gotoGoal(ctx, new goals.GoalNear(pos.x, pos.y, pos.z, 2.2), 6000);
+    }
+    const block = bot.blockAt(pos);
+    if (!block) continue;
+
+    let container;
+    try {
+      container = await bot.openContainer(block);
+      const slots = container.containerItems();
+      for (const item of slots) {
+        if (!item || JUNK.has(item.name)) continue;
         try {
-          if (/grass|fern|flower|sapling/.test(at.name)) await bot.dig(at, true);
-          await bot.placeBlock(below, new Vec3(0, 1, 0));
-          await sleep(35);
-          const placed = bot.blockAt(target);
-          if (placed && placed.name === itemName) return placed;
+          await container.withdraw(item.type, null, item.count);
+          looted++;
+          await sleep(40);
         } catch (_) {}
       }
+    } catch (_) {
+    } finally {
+      if (container) {
+        try { container.close(); } catch (_) {}
+      }
     }
+    await cleanInventoryIfNeeded(ctx);
   }
-  return null;
-}
-
-async function craftRaw(ctx, name, table, times = 1) {
-  const item = ctx.bot.registry.itemsByName[name];
-  if (!item) return false;
-  const r = ctx.bot.recipesFor(item.id, null, 1, table || null)[0]
-    || ctx.bot.recipesAll(item.id, null, table || null)[0]
-    || ctx.bot.recipesAll(item.id, null, null)[0];
-  if (!r) return false;
-  try {
-    await ctx.bot.craft(r, times, table || undefined);
-    await sleep(25);
-    return itemCount(ctx.bot, name) > 0;
-  } catch (e) {
-    ctx.log(`craft ${name} retry: ${e.message}`);
-    return false;
-  }
-}
-
-async function ensurePlanks(ctx, need) {
-  let g = 0;
-  while (countWhere(ctx.bot, isPlanks) < need && g++ < 20) {
-    const l = ctx.bot.inventory.items().find((i) => isLog(i.name));
-    if (!l || !(await craftRaw(ctx, l.name.replace(/_log$/, '_planks'), null, 1))) return false;
-  }
-  return countWhere(ctx.bot, isPlanks) >= need;
-}
-
-async function ensureSticks(ctx, need) {
-  let g = 0;
-  while (itemCount(ctx.bot, 'stick') < need && g++ < 8) {
-    if (!(await ensurePlanks(ctx, 2)) || !(await craftRaw(ctx, 'stick', null, 1))) return false;
-  }
-  return itemCount(ctx.bot, 'stick') >= need;
-}
-
-async function getTable(ctx) {
-  const def = ctx.bot.registry.blocksByName.crafting_table;
-  let t = def ? ctx.bot.findBlock({ matching: def.id, maxDistance: 24 }) : null;
-  if (!t) {
-    if (itemCount(ctx.bot, 'crafting_table') === 0) {
-      if (!(await ensurePlanks(ctx, 4)) || !(await craftRaw(ctx, 'crafting_table', null, 1))) return null;
-    }
-    t = await placeBlockNearby(ctx, 'crafting_table');
-    if (!t) return null;
-  }
-  if (ctx.bot.entity.position.distanceTo(t.position) > 3.8) {
-    await gotoGoal(ctx, new goals.GoalNear(t.position.x, t.position.y, t.position.z, 2.2), 5000);
-  }
-  return t;
-}
-
-async function craftTool(ctx, name) {
-  const cost = COST[name];
-  if (!cost) return false;
-  if (cost.cobble && countWhere(ctx.bot, isCobble) + itemCount(ctx.bot, 'stone') < cost.cobble) return false;
-  if (cost.iron && itemCount(ctx.bot, 'iron_ingot') < cost.iron) return false;
-  if (cost.diamond && itemCount(ctx.bot, 'diamond') < cost.diamond) return false;
-  if (cost.sticks && !(await ensureSticks(ctx, cost.sticks))) return false;
-  if (cost.planks && !(await ensurePlanks(ctx, cost.planks))) return false;
-  const table = await getTable(ctx);
-  return table ? craftRaw(ctx, name, table, 1)
+  if (looted > 0) log(`Loot
