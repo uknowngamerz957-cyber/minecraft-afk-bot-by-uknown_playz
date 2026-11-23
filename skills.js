@@ -83,7 +83,7 @@ function hasArmorPiece(bot, piece) {
 
 async function waitNoCombat(ctx, maxMs = 90000) {
   const t0 = Date.now();
-  while (ctx.state.combat && Date.now() - t0 < maxMs) {
+  while ((ctx.state.combat || ctx.state.rescue) && Date.now() - t0 < maxMs) {
     check(ctx);
     await sleep(250);
   }
@@ -160,13 +160,19 @@ async function mineBlock(ctx, block, opts = {}) {
   const p = block.position;
   const key = p.toString();
 
-  ctx.movements.canDig = opts.canDig !== false;
-  const ok = await gotoGoal(ctx, new goals.GoalGetToBlock(p.x, p.y, p.z), 45000);
-  ctx.movements.canDig = false;
+  // already within arm's reach? then dig right away, no walking (much faster)
+  const eye = bot.entity.position.offset(0, bot.entity.height || 1.62, 0);
+  const inReach = eye.distanceTo(p.offset(0.5, 0.5, 0.5)) <= 4.3;
+  let ok = true;
+  if (!inReach) {
+    ctx.movements.canDig = opts.canDig !== false;
+    ok = await gotoGoal(ctx, new goals.GoalGetToBlock(p.x, p.y, p.z), 25000);
+    ctx.movements.canDig = false;
+  }
 
   const target = bot.blockAt(p);
   if (!target || target.type !== block.type) return true; // already gone
-  if (!ok || bot.entity.position.distanceTo(p.offset(0.5, 0.5, 0.5)) > 5.5) {
+  if (!ok || bot.entity.position.offset(0, bot.entity.height || 1.62, 0).distanceTo(p.offset(0.5, 0.5, 0.5)) > 5.2) {
     state.badBlocks.add(key);
     return false;
   }
@@ -368,17 +374,22 @@ async function smelt(ctx, inputName, outputName, want) {
   }
 
   const deadline = Date.now() + total * 11000 + 30000;
-  while (itemCount(bot, outputName) - startOut < total && Date.now() < deadline) {
-    check(ctx);
-    await sleep(8000);
-    await waitNoCombat(ctx);
-    if (bot.entity.position.distanceTo(furnaceBlock.position) > 4) {
-      await gotoGoal(ctx, new goals.GoalNear(furnaceBlock.position.x, furnaceBlock.position.y, furnaceBlock.position.z, 2), 20000);
+  ctx.state.waiting = true; // standing still on purpose, the stuck-detector must leave me alone
+  try {
+    while (itemCount(bot, outputName) - startOut < total && Date.now() < deadline) {
+      check(ctx);
+      await sleep(8000);
+      await waitNoCombat(ctx);
+      if (bot.entity.position.distanceTo(furnaceBlock.position) > 4) {
+        await gotoGoal(ctx, new goals.GoalNear(furnaceBlock.position.x, furnaceBlock.position.y, furnaceBlock.position.z, 2), 20000);
+      }
+      try {
+        furnace = await bot.openFurnace(furnaceBlock);
+        try { if (furnace.outputItem()) await furnace.takeOutput(); } finally { furnace.close(); }
+      } catch (_) { /* window closed, try next round */ }
     }
-    try {
-      furnace = await bot.openFurnace(furnaceBlock);
-      try { if (furnace.outputItem()) await furnace.takeOutput(); } finally { furnace.close(); }
-    } catch (_) { /* window closed, try next round */ }
+  } finally {
+    ctx.state.waiting = false;
   }
   return itemCount(bot, outputName) - startOut >= total;
 }
@@ -593,7 +604,86 @@ function findExistingDoor(bot) {
   return bot.findBlock({ matching: ids, maxDistance: 48 });
 }
 
+// ---------- getting unstuck ----------
+function isInWater(bot) {
+  const feet = bot.blockAt(bot.entity.position.floored());
+  return !!bot.entity.isInWater || !!(feet && (feet.name === 'water' || feet.name === 'bubble_column'));
+}
+
+function isOnLeaves(bot) {
+  const below = bot.blockAt(bot.entity.position.offset(0, -0.5, 0).floored());
+  return !!below && /leaves/.test(below.name);
+}
+
+// swim to the nearest dry land by steering by hand (works even when the pathfinder gives up)
+async function escapeWater(ctx) {
+  const { bot } = ctx;
+  for (let i = 0; i < 8; i++) {
+    check(ctx);
+    if (!isInWater(bot)) return true;
+    const me = bot.entity.position.floored();
+    let best = null;
+    let bestD = Infinity;
+    for (let dx = -14; dx <= 14; dx++) {
+      for (let dz = -14; dz <= 14; dz++) {
+        for (let dy = -3; dy <= 3; dy++) {
+          const b = bot.blockAt(me.offset(dx, dy, dz));
+          if (!b || b.boundingBox !== 'block' || LIQUIDS.includes(b.name) || /leaves/.test(b.name)) continue;
+          const a1 = bot.blockAt(b.position.offset(0, 1, 0));
+          const a2 = bot.blockAt(b.position.offset(0, 2, 0));
+          if (a1 && a2 && a1.name === 'air' && a2.name === 'air') {
+            const d = dx * dx + dz * dz + dy * dy;
+            if (d < bestD) { bestD = d; best = b.position; }
+          }
+        }
+      }
+    }
+    if (best) {
+      try { await bot.lookAt(best.offset(0.5, 1.5, 0.5), true); } catch (_) {}
+    } else {
+      bot.look(Math.random() * Math.PI * 2, 0, true);
+    }
+    bot.setControlState('forward', true);
+    bot.setControlState('sprint', true);
+    bot.setControlState('jump', true);
+    await sleep(1500);
+    for (const c of ['forward', 'sprint', 'jump']) bot.setControlState(c, false);
+  }
+  return !isInWater(bot);
+}
+
+// stuck up on a tree canopy: dig the leaves under my feet one by one and drop down a step at a time
+async function descendFromLeaves(ctx) {
+  const { bot, state } = ctx;
+  for (let i = 0; i < 30; i++) {
+    check(ctx);
+    const below = bot.blockAt(bot.entity.position.offset(0, -0.5, 0).floored());
+    if (!below) return false;
+    if (/leaves/.test(below.name)) {
+      await equipBestToolFor(bot, below);
+      try { state.digging = true; await bot.dig(below); } catch (_) {} finally { state.digging = false; }
+      await sleep(350);
+      continue;
+    }
+    if (below.boundingBox === 'block') return true; // standing on real ground again
+    await sleep(250); // falling one block
+  }
+  return false;
+}
+
+// last resort: wiggle free in a random direction
+async function wiggle(ctx) {
+  const { bot } = ctx;
+  bot.look(Math.random() * Math.PI * 2, 0, true);
+  bot.setControlState('forward', true);
+  bot.setControlState('jump', true);
+  bot.setControlState('sprint', true);
+  await sleep(1500);
+  for (const c of ['forward', 'jump', 'sprint']) bot.setControlState(c, false);
+}
+
 module.exports = {
+  isInWater, isOnLeaves, escapeWater, descendFromLeaves, wiggle,
   sleep, check, itemCount, countWhere, isLog, isPlanks, isCobble, buildCount, toolTier, hasArmorPiece,
   waitNoCombat, gotoGoal, explore, pickupDrops, collect, mineBlock,
   craftTool, getTable, craftRaw, ensurePlanks, smelt, hunt, cookMeat,
