@@ -1,5 +1,4 @@
-// skills.js - things the bot can DO: walk, mine, craft, smelt, hunt, build a house.
-// Every function takes ctx = { bot, log, movements, state }.
+// skills.js - movement, mining, crafting, smelting, hunting, base building, and enchanting
 
 const { goals } = require('mineflayer-pathfinder');
 const { Vec3 } = require('vec3');
@@ -7,7 +6,10 @@ const gear = require('./gear');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const BUILD_BLOCKS = ['cobblestone', 'cobbled_deepslate', 'blackstone', 'andesite', 'diorite', 'granite', 'dirt', 'netherrack'];
+const BUILD_BLOCKS = [
+  'cobblestone', 'cobbled_deepslate', 'blackstone',
+  'andesite', 'diorite', 'granite', 'dirt', 'netherrack',
+];
 const TIERS = { wooden: 1, golden: 1, stone: 2, iron: 3, diamond: 4, netherite: 5 };
 const ANIMALS = new Set(['cow', 'pig', 'sheep', 'chicken', 'rabbit', 'mooshroom']);
 const MEAT = [
@@ -18,7 +20,14 @@ const MEAT = [
   ['chicken', 'cooked_chicken'],
 ];
 
-// what each thing costs
+const JUNK_NAMES = new Set([
+  'rotten_flesh', 'spider_eye', 'poisonous_potato', 'pufferfish',
+  'wheat_seeds', 'beetroot_seeds', 'melon_seeds', 'pumpkin_seeds',
+  'oak_sapling', 'birch_sapling', 'spruce_sapling', 'jungle_sapling',
+  'acacia_sapling', 'dark_oak_sapling', 'cherry_sapling', 'mangrove_propagule',
+  'short_grass', 'tall_grass', 'fern', 'large_fern', 'poppy', 'dandelion',
+]);
+
 const COST = {
   wooden_pickaxe: { planks: 3, sticks: 2 },
   wooden_axe: { planks: 3, sticks: 2 },
@@ -33,13 +42,32 @@ const COST = {
   iron_chestplate: { iron: 8 },
   iron_leggings: { iron: 7 },
   iron_boots: { iron: 4 },
+  diamond_pickaxe: { diamond: 3, sticks: 2 },
+  diamond_axe: { diamond: 3, sticks: 2 },
+  diamond_sword: { diamond: 2, sticks: 1 },
+  diamond_helmet: { diamond: 5 },
+  diamond_chestplate: { diamond: 8 },
+  diamond_leggings: { diamond: 7 },
+  diamond_boots: { diamond: 4 },
   shield: { iron: 1, planks: 6 },
   furnace: { cobble: 8 },
+  enchanting_table: { diamond: 2, obsidian: 4, book: 1 },
 };
 
 // ---------- small helpers ----------
 function check(ctx) {
   if (ctx.state.stopped) throw new Error('STOPPED');
+}
+
+function hasBad(state, key) {
+  if (!state || !state.badBlocks) return false;
+  if (typeof state.badBlocks.has === 'function') return state.badBlocks.has(key);
+  return false;
+}
+
+function markBad(state, key) {
+  if (!state || !state.badBlocks) return;
+  if (typeof state.badBlocks.add === 'function') state.badBlocks.add(key);
 }
 
 function itemCount(bot, name) {
@@ -75,15 +103,54 @@ function toolTier(bot, kind) {
   return best;
 }
 
-function hasArmorPiece(bot, piece) {
+function hasArmorPiece(bot, piece, minTier = 3) {
   const re = new RegExp('^(iron|diamond|netherite)_' + piece + '$');
-  if (gear.equippedNames(bot).some((n) => re.test(n))) return true;
-  return bot.inventory.items().some((i) => re.test(i.name));
+  const checkName = (n) => {
+    if (!re.test(n)) return false;
+    const prefix = n.split('_')[0];
+    return (TIERS[prefix] || 0) >= minTier;
+  };
+  if (gear.equippedNames(bot).some(checkName)) return true;
+  return bot.inventory.items().some((i) => checkName(i.name));
+}
+
+async function humanLookAt(bot, vec) {
+  if (!bot || !bot.entity || !vec) return;
+  const jitter = vec.offset(
+    (Math.random() - 0.5) * 0.14,
+    (Math.random() - 0.5) * 0.12,
+    (Math.random() - 0.5) * 0.14
+  );
+  try { await bot.lookAt(jitter, false); } catch (_) {}
+}
+
+async function cleanInventoryIfNeeded(ctx) {
+  const { bot, log } = ctx;
+  const items = bot.inventory.items();
+  if (items.length < 28) return;
+
+  for (const item of items) {
+    if (JUNK_NAMES.has(item.name)) {
+      try { await bot.tossStack(item); await sleep(120); } catch (_) {}
+    }
+  }
+
+  // if still crowded, trim excess dirt/gravel above 32
+  for (const item of bot.inventory.items()) {
+    if ((item.name === 'dirt' || item.name === 'gravel' || item.name === 'cobblestone') && item.count > 48) {
+      try {
+        await bot.toss(item.type, null, item.count - 32);
+        log(`Trimmed excess ${item.name}`);
+        await sleep(120);
+        if (bot.inventory.items().length < 26) break;
+      } catch (_) {}
+    }
+  }
 }
 
 async function waitNoCombat(ctx, maxMs = 90000) {
   const t0 = Date.now();
-  while ((ctx.state.combat || ctx.state.rescue) && Date.now() - t0 < maxMs) {
+  while ((ctx.state.combat || ctx.state.rescue || gear.isEating()) && Date.now() - t0 < maxMs) {
     check(ctx);
     await sleep(250);
   }
@@ -106,7 +173,7 @@ async function gotoGoal(ctx, goal, timeout = 40000) {
       return true;
     } catch (e) {
       const msg = String((e && e.message) || e);
-      if (e && (e.name === 'GoalChanged' || /goal was changed/i.test(msg))) continue; // combat took over, retry
+      if (e && (e.name === 'GoalChanged' || /goal was changed/i.test(msg))) continue;
       if (/timeout/.test(msg)) bot.pathfinder.setGoal(null);
       return false;
     } finally {
@@ -160,7 +227,6 @@ async function mineBlock(ctx, block, opts = {}) {
   const p = block.position;
   const key = p.toString();
 
-  // already within arm's reach? then dig right away, no walking (much faster)
   const eye = bot.entity.position.offset(0, bot.entity.height || 1.62, 0);
   const inReach = eye.distanceTo(p.offset(0.5, 0.5, 0.5)) <= 4.3;
   let ok = true;
@@ -171,31 +237,31 @@ async function mineBlock(ctx, block, opts = {}) {
   }
 
   const target = bot.blockAt(p);
-  if (!target || target.type !== block.type) return true; // already gone
+  if (!target || target.type !== block.type) return true;
   if (!ok || bot.entity.position.offset(0, bot.entity.height || 1.62, 0).distanceTo(p.offset(0.5, 0.5, 0.5)) > 5.2) {
-    state.badBlocks.add(key);
+    markBad(state, key);
     return false;
   }
   await equipBestToolFor(bot, target);
   if (!target.canHarvest(bot.heldItem ? bot.heldItem.type : null)) {
-    state.badBlocks.add(key); // wrong tool tier for this block
+    markBad(state, key);
     return false;
   }
   try {
     state.digging = true;
     await bot.dig(target);
   } catch (_) {
-    state.badBlocks.add(key);
+    markBad(state, key);
     return false;
   } finally {
     state.digging = false;
   }
   await sleep(100);
   await pickupDrops(ctx, 6);
+  await cleanInventoryIfNeeded(ctx);
   return true;
 }
 
-// keep mining blocks from `names` until haveFn() >= want
 async function collect(ctx, names, want, haveFn, opts = {}) {
   const { bot, state, log } = ctx;
   const ids = names.map((n) => bot.registry.blocksByName[n]).filter(Boolean).map((b) => b.id);
@@ -212,7 +278,7 @@ async function collect(ctx, names, want, haveFn, opts = {}) {
     const me = bot.entity.position;
     const found = bot
       .findBlocks({ matching: ids, maxDistance: opts.maxDistance || 64, count: 60 })
-      .filter((pos) => !state.badBlocks.has(pos.toString()))
+      .filter((pos) => !hasBad(state, pos.toString()))
       .filter((pos) => opts.maxAbove === undefined || pos.y - me.y <= opts.maxAbove)
       .sort((a, b) => a.distanceTo(me) - b.distanceTo(me));
     if (!found.length) {
@@ -221,7 +287,7 @@ async function collect(ctx, names, want, haveFn, opts = {}) {
       continue;
     }
     const block = bot.blockAt(found[0]);
-    if (!block) { state.badBlocks.add(found[0].toString()); continue; }
+    if (!block) { markBad(state, found[0].toString()); continue; }
     const ok = await mineBlock(ctx, block, opts);
     if (ok) fails = 0; else fails++;
   }
@@ -250,7 +316,7 @@ async function placeBlockNearby(ctx, itemName) {
         await bot.placeBlock(below, new Vec3(0, 1, 0));
         await sleep(200);
         return bot.blockAt(target);
-      } catch (_) { /* try another spot */ }
+      } catch (_) {}
     }
   }
   return null;
@@ -275,9 +341,9 @@ async function ensurePlanks(ctx, need) {
   const { bot } = ctx;
   let guard = 0;
   while (countWhere(bot, isPlanks) < need && guard++ < 24) {
-    const log = bot.inventory.items().find((i) => isLog(i.name));
-    if (!log) return false;
-    if (!(await craftRaw(ctx, log.name.replace(/_log$/, '_planks'), null, 1))) return false;
+    const logItem = bot.inventory.items().find((i) => isLog(i.name));
+    if (!logItem) return false;
+    if (!(await craftRaw(ctx, logItem.name.replace(/_log$/, '_planks'), null, 1))) return false;
   }
   return countWhere(bot, isPlanks) >= need;
 }
@@ -315,6 +381,9 @@ async function craftTool(ctx, name) {
   if (!cost) return false;
   if (cost.cobble && countWhere(bot, isCobble) < cost.cobble) return false;
   if (cost.iron && itemCount(bot, 'iron_ingot') < cost.iron) return false;
+  if (cost.diamond && itemCount(bot, 'diamond') < cost.diamond) return false;
+  if (cost.obsidian && itemCount(bot, 'obsidian') < cost.obsidian) return false;
+  if (cost.book && itemCount(bot, 'book') < cost.book) return false;
   if (cost.sticks && !(await ensureSticks(ctx, cost.sticks))) return false;
   if (cost.planks && !(await ensurePlanks(ctx, cost.planks))) return false;
   const table = await getTable(ctx);
@@ -347,7 +416,6 @@ async function smelt(ctx, inputName, outputName, want) {
   const total = Math.min(itemCount(bot, inputName), want);
   if (total <= 0) return false;
 
-  // fuel: coal/charcoal (8 items each) or wood (1.5 items each)
   let fuel = bot.inventory.items().find((i) => i.name === 'coal' || i.name === 'charcoal');
   let fuelCount = 0;
   if (fuel && fuel.count * 8 >= total) {
@@ -374,7 +442,7 @@ async function smelt(ctx, inputName, outputName, want) {
   }
 
   const deadline = Date.now() + total * 11000 + 30000;
-  ctx.state.waiting = true; // standing still on purpose, the stuck-detector must leave me alone
+  ctx.state.waiting = true;
   try {
     while (itemCount(bot, outputName) - startOut < total && Date.now() < deadline) {
       check(ctx);
@@ -386,7 +454,7 @@ async function smelt(ctx, inputName, outputName, want) {
       try {
         furnace = await bot.openFurnace(furnaceBlock);
         try { if (furnace.outputItem()) await furnace.takeOutput(); } finally { furnace.close(); }
-      } catch (_) { /* window closed, try next round */ }
+      } catch (_) {}
     }
   } finally {
     ctx.state.waiting = false;
@@ -423,13 +491,17 @@ async function hunt(ctx, wantFood) {
         if (!following) { bot.pathfinder.setGoal(new goals.GoalFollow(animal, 2), true); following = true; }
       } else if (Date.now() - lastHit > gear.weaponCooldown(bot) + 50) {
         lastHit = Date.now();
-        try { await bot.lookAt(animal.position.offset(0, animal.height * 0.7, 0), true); bot.attack(animal); } catch (_) {}
+        try {
+          await humanLookAt(bot, animal.position.offset(0, animal.height * 0.7, 0));
+          bot.attack(animal);
+        } catch (_) {}
       }
       await sleep(150);
     }
     bot.pathfinder.setGoal(null);
     await sleep(300);
     await pickupDrops(ctx, 8);
+    await cleanInventoryIfNeeded(ctx);
   }
   return gear.foodCount(bot) >= wantFood;
 }
@@ -448,7 +520,6 @@ const AIRS = ['air', 'cave_air', 'void_air'];
 const LIQUIDS = ['water', 'lava'];
 const isSolid = (b) => !!b && b.boundingBox === 'block';
 
-// the 71 blocks of a 5x5 house: 3-high walls (door gap on the +z side) and a roof
 function housePlan(cx, cy, cz) {
   const ring = [];
   for (let dx = -2; dx <= 2; dx++) {
@@ -460,7 +531,7 @@ function housePlan(cx, cy, cz) {
   const cells = [];
   for (let layer = 1; layer <= 3; layer++) {
     for (const [dx, dz] of ring) {
-      if (dx === 0 && dz === 2 && layer <= 2) continue; // door gap
+      if (dx === 0 && dz === 2 && layer <= 2) continue;
       cells.push(new Vec3(cx + dx, cy + layer, cz + dz));
     }
   }
@@ -487,7 +558,7 @@ function siteBadness(bot, cx, cy, cz) {
 
 function findBuildSite(bot) {
   const me = bot.entity.position.floored();
-  const cy = me.y - 1; // ground level under the bot
+  const cy = me.y - 1;
   let best = null;
   for (let r = 0; r <= 24; r += 6) {
     for (let dx = -r; dx <= r; dx += 6) {
@@ -516,7 +587,7 @@ async function placeAt(ctx, pos, itemName) {
       await bot.equip(item, 'hand');
       await bot.placeBlock(ref, new Vec3(-f[0], -f[1], -f[2]));
       if (isSolid(bot.blockAt(pos))) return true;
-    } catch (_) { /* try the next face */ }
+    } catch (_) {}
   }
   return false;
 }
@@ -528,7 +599,6 @@ async function buildHouse(ctx, site) {
 
   if (!(await gotoGoal(ctx, new goals.GoalBlock(cx, cy + 1, cz), 40000))) return false;
 
-  // clear anything in the way (trees, flowers, hills)
   let cleared = 0;
   for (let dy = 1; dy <= 4; dy++) {
     for (let dx = -2; dx <= 2; dx++) {
@@ -542,7 +612,6 @@ async function buildHouse(ctx, site) {
     }
   }
 
-  // fill holes in the ground
   for (let dx = -2; dx <= 2; dx++) {
     for (let dz = -2; dz <= 2; dz++) {
       const item = pickBuildItem(bot);
@@ -565,7 +634,6 @@ async function buildHouse(ctx, site) {
     await sleep(120);
   }
 
-  // door + torches (nice to have, failures are fine)
   try {
     const planks = bot.inventory.items().find((i) => isPlanks(i.name));
     if (planks || (await ensurePlanks(ctx, 6))) {
@@ -604,6 +672,66 @@ function findExistingDoor(bot) {
   return bot.findBlock({ matching: ids, maxDistance: 48 });
 }
 
+// ---------- enchanting ----------
+async function enchantGear(ctx) {
+  const { bot, log } = ctx;
+  const xp = bot.experience && typeof bot.experience.level === 'number' ? bot.experience.level : 0;
+  const lapis = itemCount(bot, 'lapis_lazuli');
+
+  const targets = bot.inventory.items().filter((i) =>
+    /^(iron|diamond)_(sword|pickaxe|axe|helmet|chestplate|leggings|boots)$/.test(i.name) &&
+    (!i.nbt || !i.nbt.value || !i.nbt.value.Enchantments)
+  );
+  if (!targets.length) return true;
+
+  if (xp < 3 || lapis < 1) {
+    log(`Enchanting skipped for now (level=${xp}, lapis=${lapis})`);
+    return true;
+  }
+
+  const enchDef = bot.registry.blocksByName.enchanting_table;
+  let tableBlock = enchDef ? bot.findBlock({ matching: enchDef.id, maxDistance: 24 }) : null;
+  if (!tableBlock && itemCount(bot, 'enchanting_table') > 0) {
+    tableBlock = await placeBlockNearby(ctx, 'enchanting_table');
+  }
+  if (!tableBlock || typeof bot.openEnchantmentTable !== 'function') {
+    log('No enchanting table available yet, keeping gear as-is');
+    return true;
+  }
+
+  if (bot.entity.position.distanceTo(tableBlock.position) > 3.5) {
+    await gotoGoal(ctx, new goals.GoalNear(tableBlock.position.x, tableBlock.position.y, tableBlock.position.z, 2), 20000);
+  }
+
+  let enchantedAny = false;
+  for (const item of targets.slice(0, 4)) {
+    let table;
+    try {
+      table = await bot.openEnchantmentTable(tableBlock);
+      await table.putTargetItem(item);
+      const lapisItem = bot.inventory.items().find((i) => i.name === 'lapis_lazuli');
+      if (!lapisItem) break;
+      await table.putLapis(lapisItem);
+      await sleep(250);
+      const slot = xp >= 15 ? 2 : xp >= 8 ? 1 : 0;
+      await table.enchant(slot);
+      enchantedAny = true;
+      log(`Enchanted ${item.name} at slot ${slot}`);
+    } catch (_) {
+      break;
+    } finally {
+      if (table) {
+        try {
+          if (table.targetItem()) await table.takeTargetItem();
+          if (table.lapisItem()) await table.takeLapis();
+          table.close();
+        } catch (_) {}
+      }
+    }
+  }
+  return enchantedAny || targets.length > 0;
+}
+
 // ---------- getting unstuck ----------
 function isInWater(bot) {
   const feet = bot.blockAt(bot.entity.position.floored());
@@ -615,7 +743,6 @@ function isOnLeaves(bot) {
   return !!below && /leaves/.test(below.name);
 }
 
-// swim to the nearest dry land by steering by hand (works even when the pathfinder gives up)
 async function escapeWater(ctx) {
   const { bot } = ctx;
   for (let i = 0; i < 8; i++) {
@@ -639,9 +766,9 @@ async function escapeWater(ctx) {
       }
     }
     if (best) {
-      try { await bot.lookAt(best.offset(0.5, 1.5, 0.5), true); } catch (_) {}
+      await humanLookAt(bot, best.offset(0.5, 1.5, 0.5));
     } else {
-      bot.look(Math.random() * Math.PI * 2, 0, true);
+      try { await bot.look(Math.random() * Math.PI * 2, 0, false); } catch (_) {}
     }
     bot.setControlState('forward', true);
     bot.setControlState('sprint', true);
@@ -652,7 +779,6 @@ async function escapeWater(ctx) {
   return !isInWater(bot);
 }
 
-// stuck up on a tree canopy: dig the leaves under my feet one by one and drop down a step at a time
 async function descendFromLeaves(ctx) {
   const { bot, state } = ctx;
   for (let i = 0; i < 30; i++) {
@@ -665,16 +791,15 @@ async function descendFromLeaves(ctx) {
       await sleep(350);
       continue;
     }
-    if (below.boundingBox === 'block') return true; // standing on real ground again
-    await sleep(250); // falling one block
+    if (below.boundingBox === 'block') return true;
+    await sleep(250);
   }
   return false;
 }
 
-// last resort: wiggle free in a random direction
 async function wiggle(ctx) {
   const { bot } = ctx;
-  bot.look(Math.random() * Math.PI * 2, 0, true);
+  try { await bot.look(Math.random() * Math.PI * 2, 0, false); } catch (_) {}
   bot.setControlState('forward', true);
   bot.setControlState('jump', true);
   bot.setControlState('sprint', true);
@@ -685,7 +810,7 @@ async function wiggle(ctx) {
 module.exports = {
   isInWater, isOnLeaves, escapeWater, descendFromLeaves, wiggle,
   sleep, check, itemCount, countWhere, isLog, isPlanks, isCobble, buildCount, toolTier, hasArmorPiece,
-  waitNoCombat, gotoGoal, explore, pickupDrops, collect, mineBlock,
+  cleanInventoryIfNeeded, waitNoCombat, gotoGoal, explore, pickupDrops, collect, mineBlock,
   craftTool, getTable, craftRaw, ensurePlanks, smelt, hunt, cookMeat,
-  housePlan, findBuildSite, buildHouse, findExistingDoor, COST,
+  housePlan, findBuildSite, buildHouse, findExistingDoor, enchantGear, COST,
 };
