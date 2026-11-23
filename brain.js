@@ -24,6 +24,7 @@ function startBrain(bot, cfg, log) {
   const movements = new Movements(bot);
   movements.canDig = false;
   bot.pathfinder.setMovements(movements);
+  bot.pathfinder.thinkTimeout = 4000; // give up on impossible paths faster
 
   const state = {
     combat: false,
@@ -32,6 +33,9 @@ function startBrain(bot, cfg, log) {
     badBlocks: new Set(),
     home: null,
     houseBuilt: false,
+    rescue: false, // true while getting out of water / off a tree / unstuck
+    waiting: false, // true while standing still on purpose (smelting)
+    loot: null, // where I died, so I can go get my stuff
   };
   const ctx = { bot, log, movements, state };
 
@@ -100,10 +104,45 @@ function startBrain(bot, cfg, log) {
   });
 
   // ---------------- combat actions ----------------
+  // ---- shield (off-hand): raise it while fighting, lower it otherwise ----
+  function hasShield() {
+    try {
+      const o = bot.inventory.slots[bot.getEquipmentDestSlot('off-hand')];
+      return !!o && o.name === 'shield';
+    } catch (_) { return false; }
+  }
+  function shieldUp() {
+    if (gear.isEating() || !hasShield() || bot.usingHeldItem) return;
+    try { bot.activateItem(true); } catch (_) {}
+  }
+  function shieldDown() {
+    if (gear.isEating() || !bot.usingHeldItem) return;
+    try { bot.deactivateItem(); } catch (_) {}
+  }
+  async function equipShield() {
+    if (hasShield()) return;
+    const s = bot.inventory.items().find((i) => i.name === 'shield');
+    if (s) { try { await bot.equip(s, 'off-hand'); } catch (_) {} }
+  }
+
+  // ---- steering ----
+  let strafeDir = 1;
+  let strafeUntil = 0;
+  let lastFleeSet = 0;
+  function stopMelee() {
+    for (const c of ['forward', 'back', 'left', 'right', 'jump']) bot.setControlState(c, false);
+  }
+
   function flee(from) {
     state.combat = true;
-    if (followId !== 'flee:' + from.id) {
+    shieldDown();
+    const now = Date.now();
+    const moving = typeof bot.pathfinder.isMoving === 'function' ? bot.pathfinder.isMoving() : true;
+    // set a new run-away goal when it changes, or when we stopped moving (reached it / blocked)
+    if (followId !== 'flee:' + from.id || (!moving && now - lastFleeSet > 1500)) {
+      if (followId !== 'flee:' + from.id) stopMelee();
       followId = 'flee:' + from.id;
+      lastFleeSet = now;
       bot.setControlState('sprint', true);
       const p = bot.entity.position;
       const dx = p.x - from.position.x;
@@ -113,21 +152,50 @@ function startBrain(bot, cfg, log) {
     }
   }
 
+  // PvP / mob fighting that keeps MOVING: chase when far, then walk at the target,
+  // back off when too close, strafe left/right, hop now and then, keep the shield up.
   function fight(target) {
     state.combat = true;
     gear.equipBestWeapon(bot).catch(() => {});
-    if (followId !== 'fight:' + target.id) {
-      followId = 'fight:' + target.id;
-      bot.setControlState('sprint', true);
-      bot.pathfinder.setGoal(new goals.GoalFollow(target, 2), true);
-    }
     const dist = bot.entity.position.distanceTo(target.position);
-    if (dist < 3.4 && Date.now() - lastAttack > gear.weaponCooldown(bot) + 30) {
-      lastAttack = Date.now();
-      bot.lookAt(target.position.offset(0, (target.height || 1.5) * 0.85, 0), true)
-        .then(() => { try { bot.attack(target); } catch (_) {} })
-        .catch(() => {});
+    const now = Date.now();
+
+    if (dist > 4.5) {
+      // far: let the pathfinder chase
+      if (followId !== 'chase:' + target.id) {
+        stopMelee();
+        followId = 'chase:' + target.id;
+        bot.pathfinder.setGoal(new goals.GoalFollow(target, 2), true);
+      }
+      bot.setControlState('sprint', true);
+      shieldDown();
+      return;
     }
+
+    // close: steer by hand
+    if (followId !== 'melee:' + target.id) {
+      bot.pathfinder.setGoal(null);
+      followId = 'melee:' + target.id;
+    }
+    bot.lookAt(target.position.offset(0, (target.height || 1.6) * 0.85, 0), true).catch(() => {});
+    bot.setControlState('forward', dist > 2.3);
+    bot.setControlState('sprint', dist > 2.3);
+    bot.setControlState('back', dist < 1.3);
+    if (now > strafeUntil) {
+      strafeDir = Math.random() < 0.5 ? -1 : 1;
+      strafeUntil = now + 500 + Math.random() * 700;
+    }
+    bot.setControlState('left', strafeDir < 0 && dist < 3.5);
+    bot.setControlState('right', strafeDir > 0 && dist < 3.5);
+    if (bot.entity.onGround && Math.random() < 0.08) {
+      bot.setControlState('jump', true);
+      setTimeout(() => bot.setControlState('jump', false), 120);
+    }
+    if (dist < 3.3 && now - lastAttack > gear.weaponCooldown(bot) + 30) {
+      lastAttack = now;
+      try { bot.attack(target); } catch (_) {}
+    }
+    shieldUp();
   }
 
   function combatTick() {
@@ -169,6 +237,8 @@ function startBrain(bot, cfg, log) {
     if (state.combat) {
       state.combat = false;
       followId = null;
+      stopMelee();
+      shieldDown();
       bot.setControlState('sprint', false);
       bot.pathfinder.setGoal(null);
     }
@@ -177,7 +247,47 @@ function startBrain(bot, cfg, log) {
   // ---------------- background upkeep ----------------
   timers.push(setInterval(combatTick, 400));
   timers.push(setInterval(() => { gear.eatIfNeeded(bot).catch(() => {}); }, 1500));
-  timers.push(setInterval(() => { gear.equipBestArmor(bot).catch(() => {}); }, 6000));
+  timers.push(setInterval(() => {
+    gear.equipBestArmor(bot).then(() => equipShield()).catch(() => {});
+  }, 6000));
+
+  // stuck detector: no real movement for 15s while NOT busy on purpose -> get free
+  let lastPos = null;
+  let lastMoveAt = Date.now();
+  let stuckCount = 0;
+  timers.push(setInterval(async () => {
+    try {
+      if (!bot.entity || state.stopped || bot.health <= 0 || state.rescue) return;
+      const now = Date.now();
+      const p = bot.entity.position;
+      const moved = !lastPos || p.distanceTo(lastPos) > 0.7;
+      if (moved) { lastPos = p.clone(); lastMoveAt = now; stuckCount = 0; return; }
+      if (state.waiting || state.digging || state.combat || gear.isEating()) { lastMoveAt = now; return; }
+      const inWater = S.isInWater(bot);
+      const onLeaves = S.isOnLeaves(bot);
+      const limit = inWater || onLeaves ? 6000 : 15000;
+      if (now - lastMoveAt < limit) return;
+      stuckCount++;
+      lastMoveAt = Date.now();
+      state.rescue = true;
+      bot.pathfinder.setGoal(null);
+      if (inWater) {
+        log(`Stuck in water (${stuckCount}), swimming to land`);
+        await S.escapeWater(ctx);
+      } else if (onLeaves) {
+        log(`Stuck on tree leaves (${stuckCount}), climbing down`);
+        await S.descendFromLeaves(ctx);
+      } else {
+        log(`Stuck (${stuckCount}), wiggling free`);
+        await S.wiggle(ctx);
+        if (stuckCount >= 2) await S.explore(ctx, 20);
+      }
+    } catch (e) {
+      if (!(e && e.message === 'STOPPED')) log(`unstuck error: ${e && e.message}`);
+    } finally {
+      state.rescue = false;
+    }
+  }, 3000));
   timers.push(setInterval(() => {
     for (const [id, t] of ignore) if (t < Date.now()) ignore.delete(id);
   }, 30000));
@@ -196,10 +306,20 @@ function startBrain(bot, cfg, log) {
   }
 
   bot.on('death', () => {
+    const p = bot.entity && bot.entity.position;
+    const hadItems = bot.inventory.items().length > 0;
+    if (p && hadItems) {
+      // items stay on the ground ~5 minutes: remember where, and go back for them (3 tries)
+      state.loot = { pos: p.clone(), tries: 0, expires: Date.now() + 4.5 * 60 * 1000 };
+      log(`I died at ${p.x.toFixed(0)}, ${p.y.toFixed(0)}, ${p.z.toFixed(0)}. I will try to get my stuff back (3 tries)`);
+    } else {
+      log('I died (nothing to recover), starting over');
+    }
     state.combat = false;
+    state.rescue = false;
     followId = null;
     enemy = null;
-    log('I died, respawning and starting over from my inventory');
+    stopMelee();
   });
 
   // ---------------- stages ----------------
@@ -218,8 +338,39 @@ function startBrain(bot, cfg, log) {
   }
 
   let currentStage = 'starting';
+  const invCount = () => bot.inventory.items().reduce((a, i) => a + i.count, 0);
 
   const STAGES = [
+    {
+      // after dying: walk back to the death spot and pick the loot up (max 3 tries)
+      name: 'recover loot',
+      done: () => !state.loot || state.loot.tries >= 3 || Date.now() > state.loot.expires,
+      run: async () => {
+        const loot = state.loot;
+        loot.tries++;
+        const before = invCount();
+        log(`Going back to where I died (try ${loot.tries}/3)`);
+        await S.gotoGoal(ctx, new goals.GoalNear(loot.pos.x, loot.pos.y, loot.pos.z, 3), 60000);
+        await S.pickupDrops(ctx, 16);
+        await S.sleep(600);
+        await S.pickupDrops(ctx, 16);
+        await gear.equipBestArmor(bot);
+        await gear.equipBestWeapon(bot);
+        await equipShield();
+        const gained = invCount() - before;
+        if (gained > 0) {
+          log(`Got ${gained} items back`);
+          state.loot = null;
+          return true;
+        }
+        if (loot.tries >= 3) {
+          log('Could not get my loot back after 3 tries, going back to grinding');
+          state.loot = null;
+          return true; // give up gracefully
+        }
+        return false;
+      },
+    },
     {
       // emergency: low health/hunger and nothing to eat -> get food before anything else
       name: 'emergency food',
@@ -337,8 +488,9 @@ function startBrain(bot, cfg, log) {
   }
 
   async function mainLoop() {
-    try { if (bot.waitForChunksToLoad) await bot.waitForChunksToLoad(); } catch (_) {}
-    await S.sleep(3000);
+    // wait for the world, but never more than 10 seconds (this used to cost minutes)
+    try { if (bot.waitForChunksToLoad) await Promise.race([bot.waitForChunksToLoad(), S.sleep(10000)]); } catch (_) {}
+    await S.sleep(500);
     log('Brain started. Working through: wood -> stone -> food -> house -> iron gear');
     while (!state.stopped) {
       try {
@@ -356,11 +508,12 @@ function startBrain(bot, cfg, log) {
           fails[stage.name] = (fails[stage.name] || 0) + 1;
           log(`Stage not finished: ${stage.name} (try ${fails[stage.name]})`);
           if (fails[stage.name] >= 3) {
-            skipUntil[stage.name] = Date.now() + 10 * 60 * 1000;
+            skipUntil[stage.name] = Date.now() + 3 * 60 * 1000;
             fails[stage.name] = 0;
-            log(`Skipping "${stage.name}" for 10 minutes`);
+            log(`Skipping "${stage.name}" for 3 minutes`);
           }
-          await S.sleep(3000);
+          // change location, the resources may simply be somewhere else
+          await S.explore(ctx, 50);
         }
       } catch (e) {
         if (e && e.message === 'STOPPED') return;
