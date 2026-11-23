@@ -127,7 +127,7 @@ async function pickupDrops(ctx, radius = 7) {
   for (let i = 0; i < 6; i++) {
     const me = bot.entity.position;
     const items = Object.values(bot.entities)
-      .filter((e) => e && e.position && (e.name === 'item' || e.objectType === 'Item' || e.displayName === 'Item'))
+      .filter((e) => e && e.position && (e.name === 'item' || e.displayName === 'Item'))
       .filter((e) => e.position.distanceTo(me) < radius)
       .sort((a, b) => a.position.distanceTo(me) - b.position.distanceTo(me));
     if (!items.length) return;
