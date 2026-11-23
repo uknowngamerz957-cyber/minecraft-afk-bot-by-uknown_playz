@@ -138,6 +138,7 @@ async function eatIfNeeded(bot) {
   if (!food) return false;
   eating = true;
   try {
+    if (bot.usingHeldItem) { try { bot.deactivateItem(); } catch (_) {} } // lower the shield first
     await bot.equip(food, 'hand');
     await bot.consume();
     return true;
@@ -158,4 +159,5 @@ module.exports = {
   equippedNames,
   foodCount,
   eatIfNeeded,
+  isEating: () => eating,
 };
