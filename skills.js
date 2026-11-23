@@ -1,4 +1,4 @@
-// skills.js - fast mining, chest looting, haybale->bread, full crafting, smelting & unstuck
+// skills.js - fast mining, direct drop pickup, chest looting, haybale->bread, full crafting & smelting
 const { goals } = require('mineflayer-pathfinder');
 const { Vec3 } = require('vec3');
 const gear = require('./gear');
@@ -257,4 +257,141 @@ async function getTable(ctx) {
 
 async function craftTool(ctx, name) {
   if (name === 'bread') return craftBreadFromHay(ctx);
-  if (name === 'stick') return ensureSticks(ctx,
+  if (name === 'stick') return ensureSticks(ctx, 4);
+  if (name === 'crafting_table') return !!(await getTable(ctx));
+  const cost = COST[name];
+  if (!cost) return craftRaw(ctx, name, await getTable(ctx), 1);
+  if (cost.cobble && countWhere(ctx.bot, isCobble) + itemCount(ctx.bot, 'stone') < cost.cobble) return false;
+  if (cost.iron && itemCount(ctx.bot, 'iron_ingot') < cost.iron) return false;
+  if (cost.diamond && itemCount(ctx.bot, 'diamond') < cost.diamond) return false;
+  if (cost.sticks && !(await ensureSticks(ctx, cost.sticks))) return false;
+  if (cost.planks && !(await ensurePlanks(ctx, cost.planks))) return false;
+  const table = await getTable(ctx);
+  return table ? craftRaw(ctx, name, table, 1) : false;
+}
+
+async function craftAllAvailable(ctx) {
+  const { bot } = ctx;
+  await ensurePlanks(ctx, 4).catch(() => {});
+  await ensureSticks(ctx, 4).catch(() => {});
+  await craftBreadFromHay(ctx, 4).catch(() => {});
+  if (itemCount(bot, 'crafting_table') === 0) await getTable(ctx).catch(() => {});
+  if (itemCount(bot, 'furnace') === 0 && countWhere(bot, isCobble) + itemCount(bot, 'stone') >= 8) await craftTool(ctx, 'furnace').catch(() => {});
+  const order = [
+    'diamond_sword', 'diamond_pickaxe', 'diamond_axe', 'diamond_shovel', 'diamond_helmet', 'diamond_chestplate', 'diamond_leggings', 'diamond_boots',
+    'iron_sword', 'iron_pickaxe', 'iron_axe', 'iron_shovel', 'iron_helmet', 'iron_chestplate', 'iron_leggings', 'iron_boots',
+    'stone_sword', 'stone_pickaxe', 'stone_axe', 'stone_shovel', 'wooden_sword', 'wooden_pickaxe', 'wooden_axe', 'wooden_shovel',
+  ];
+  for (const name of order) { if (itemCount(bot, name) === 0) await craftTool(ctx, name).catch(() => {}); }
+}
+
+async function getFurnace(ctx) {
+  const def = ctx.bot.registry.blocksByName.furnace;
+  if (!def) return null;
+  let f = ctx.bot.findBlock({ matching: def.id, maxDistance: 24 });
+  if (!f) {
+    if (itemCount(ctx.bot, 'furnace') === 0 && !(await craftTool(ctx, 'furnace'))) return null;
+    f = await placeBlockNearby(ctx, 'furnace');
+    if (!f) return null;
+  }
+  if (ctx.bot.entity.position.distanceTo(f.position) > 3.5) await gotoGoal(ctx, new goals.GoalNear(f.position.x, f.position.y, f.position.z, 2.2), 5000);
+  return f;
+}
+
+async function smelt(ctx, inputName, outputName, want) {
+  const { bot, log } = ctx;
+  const inItem = bot.registry.itemsByName[inputName], outItem = bot.registry.itemsByName[outputName];
+  if (!inItem || !outItem) return false;
+  const total = Math.min(itemCount(bot, inputName), want);
+  if (total <= 0) return false;
+  let fuel = bot.inventory.items().find((i) => i.name === 'coal' || i.name === 'charcoal'), fuelCount = 0;
+  if (fuel && fuel.count * 8 >= total) fuelCount = Math.ceil(total / 8);
+  else { fuel = bot.inventory.items().find((i) => isLog(i.name)) || bot.inventory.items().find((i) => isPlanks(i.name)); if (fuel) fuelCount = Math.min(fuel.count, Math.ceil(total / 1.5)); }
+  if (!fuel || fuelCount <= 0) { log('no fuel'); return false; }
+  const fb = await getFurnace(ctx);
+  if (!fb) return false;
+  const startOut = itemCount(bot, outputName);
+  let furnace = await bot.openFurnace(fb);
+  try { await furnace.putFuel(fuel.type, null, fuelCount); await furnace.putInput(inItem.id, null, total); } finally { furnace.close(); }
+  const deadline = Date.now() + total * 11000 + 15000;
+  ctx.state.waiting = true;
+  try {
+    while (itemCount(bot, outputName) - startOut < total && Date.now() < deadline) {
+      check(ctx); await sleep(3000); await waitNoCombat(ctx);
+      if (bot.entity.position.distanceTo(fb.position) > 4) await gotoGoal(ctx, new goals.GoalNear(fb.position.x, fb.position.y, fb.position.z, 2.2), 5000);
+      try { furnace = await bot.openFurnace(fb); try { if (furnace.outputItem()) await furnace.takeOutput(); } finally { furnace.close(); } } catch (_) {}
+    }
+  } finally { ctx.state.waiting = false; }
+  return itemCount(bot, outputName) - startOut >= total;
+}
+
+async function hunt(ctx, wantFood) {
+  const { bot } = ctx;
+  await lootChests(ctx, 48, 4).catch(() => {});
+  await craftBreadFromHay(ctx, wantFood).catch(() => {});
+  let attempts = 0;
+  while (gear.foodCount(bot) < wantFood && attempts < 8) {
+    check(ctx); await waitNoCombat(ctx);
+    const me = bot.entity.position;
+    const animal = Object.values(bot.entities).filter((e) => e && e.position && ANIMALS.has(e.name) && e.position.distanceTo(me) < 64).sort((a, b) => a.position.distanceTo(me) - b.position.distanceTo(me))[0];
+    if (!animal) { attempts++; await lootChests(ctx, 48, 3).catch(() => {}); await explore(ctx, 26); continue; }
+    attempts++; await gear.equipBestWeapon(bot);
+    const t0 = Date.now(); let lastHit = 0, following = false;
+    while (bot.entities[animal.id] && Date.now() - t0 < 14000) {
+      check(ctx); await waitNoCombat(ctx);
+      if (bot.entity.position.distanceTo(animal.position) > 3.2) { if (!following) { bot.pathfinder.setGoal(new goals.GoalFollow(animal, 2), true); following = true; } }
+      else if (Date.now() - lastHit > gear.weaponCooldown(bot) + 15) { lastHit = Date.now(); try { await humanLookAt(bot, animal.position.offset(0, animal.height * 0.7, 0)); bot.attack(animal); } catch (_) {} }
+      await sleep(50);
+    }
+    bot.pathfinder.setGoal(null); await sleep(50); await pickupDrops(ctx, 10); await cleanInventoryIfNeeded(ctx);
+  }
+  return gear.foodCount(bot) >= wantFood;
+}
+
+async function cookMeat(ctx) {
+  await craftBreadFromHay(ctx, 4).catch(() => {});
+  for (const [raw, cooked] of MEAT) {
+    const n = itemCount(ctx.bot, raw);
+    if (n >= 1) { try { await smelt(ctx, raw, cooked, n); } catch (e) { ctx.log(`cook ${raw}: ${e.message}`); } }
+  }
+}
+
+const isInWater = (bot) => { const f = bot.blockAt(bot.entity.position.floored()); return !!bot.entity.isInWater || !!(f && LIQUIDS.includes(f.name)); };
+const isOnLeaves = (bot) => { const b = bot.blockAt(bot.entity.position.offset(0, -0.5, 0).floored()); return !!(b && /leaves/.test(b.name)); };
+
+async function escapeWater(ctx) {
+  for (let i = 0; i < 6; i++) {
+    check(ctx); if (!isInWater(ctx.bot)) return true;
+    try { await ctx.bot.look(Math.random() * Math.PI * 2, 0, false); } catch (_) {}
+    for (const c of ['forward', 'sprint', 'jump']) ctx.bot.setControlState(c, true);
+    await sleep(550);
+    for (const c of ['forward', 'sprint', 'jump']) ctx.bot.setControlState(c, false);
+  }
+  return !isInWater(ctx.bot);
+}
+
+async function descendFromLeaves(ctx) {
+  for (let i = 0; i < 18; i++) {
+    check(ctx);
+    const b = ctx.bot.blockAt(ctx.bot.entity.position.offset(0, -0.5, 0).floored());
+    if (!b) return false;
+    if (/leaves/.test(b.name)) { await equipBestToolFor(ctx.bot, b); try { ctx.state.digging = true; await ctx.bot.dig(b, true); } catch (_) {} finally { ctx.state.digging = false; } await sleep(50); continue; }
+    if (b.boundingBox === 'block') return true;
+    await sleep(50);
+  }
+  return false;
+}
+
+async function wiggle(ctx) {
+  try { await ctx.bot.look(Math.random() * Math.PI * 2, 0, false); } catch (_) {}
+  for (const c of ['forward', 'jump', 'sprint']) ctx.bot.setControlState(c, true);
+  await sleep(500);
+  for (const c of ['forward', 'jump', 'sprint']) ctx.bot.setControlState(c, false);
+}
+
+module.exports = {
+  isInWater, isOnLeaves, escapeWater, descendFromLeaves, wiggle, sleep, check, itemCount, countWhere,
+  isLog, isPlanks, isCobble, toolTier, hasArmorPiece, cleanInventoryIfNeeded, waitNoCombat, gotoGoal,
+  explore, pickupDrops, collect, mineBlock, lootChests, craftBreadFromHay, craftAllAvailable,
+  craftTool, getTable, craftRaw, ensurePlanks, smelt, hunt, cookMeat, COST, BUILD_BLOCKS,
+};
