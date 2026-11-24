@@ -421,3 +421,79 @@ function startBrain(bot, cfg, log) {
         if (haveMats() < 48) {
           await S.collect(ctx, ['stone', 'cobblestone', 'cobbled_deepslate', 'dirt'], 48, haveMats, { canDig: true, maxDistance: 56 });
         }
+        if (haveMats() >= 48) {
+          state.houseMatsDone = true;
+          return true;
+        }
+        return false;
+      },
+    },
+    {
+      name: '6. diamond gear',
+      done: () => missingDiamond().length === 0,
+      run: async () => {
+        if (S.toolTier(bot, 'pickaxe') < 3) return false;
+        await S.lootChests(ctx, 48, 5).catch(() => {});
+        const missing = missingDiamond();
+        const diamondsNeeded = missing.reduce((sum, n) => sum + (S.COST[n] ? S.COST[n].diamond || 0 : 0), 0);
+        if (have('diamond') < diamondsNeeded) {
+          await S.collect(ctx, DIAMOND_ORES, diamondsNeeded, () => have('diamond'), { maxDistance: 96 });
+        }
+        for (const name of missing) {
+          if (have('diamond') >= (S.COST[name].diamond || 0)) await S.craftTool(ctx, name);
+        }
+        await S.craftAllAvailable(ctx).catch(() => {});
+        await gear.equipBestArmor(bot);
+        await gear.equipBestWeapon(bot);
+        return missingDiamond().length === 0;
+      },
+    },
+  ];
+
+  let currentStage = '1. wood + wooden pickaxe';
+
+  async function mainLoop() {
+    try { if (bot.waitForChunksToLoad) await Promise.race([bot.waitForChunksToLoad(), S.sleep(4000)]); } catch (_) {}
+    await S.sleep(100);
+    log('3x fast strict 6-stage brain started');
+    while (!state.stopped) {
+      try {
+        if (!bot.entity || bot.health <= 0) { await S.sleep(600); continue; }
+        const stage = STAGES.find((s) => !s.done());
+        if (!stage) {
+          log('All 6 stages complete');
+          await S.sleep(3000);
+          continue;
+        }
+        currentStage = stage.name;
+        log(`Stage: ${stage.name}`);
+        const ok = await stage.run();
+        if (!ok) {
+          await climbOutOfHole();
+          await S.explore(ctx, 40);
+        }
+      } catch (e) {
+        if (e && e.message === 'STOPPED') return;
+        log(`Error: ${e && e.stack ? e.stack.split('\n').slice(0, 2).join(' | ') : e}`);
+        await S.sleep(600);
+      }
+    }
+  }
+
+  timers.push(setInterval(() => {
+    try {
+      log(`status | stage=${currentStage} | hp=${bot.health} food=${bot.food} | logs=${S.countWhere(bot, S.isLog)} stone=${stonePool()} iron=${have('iron_ingot') + have('raw_iron')} dia=${have('diamond')} | axe=${S.toolTier(bot, 'axe')} sword=${S.toolTier(bot, 'sword')} pick=${S.toolTier(bot, 'pickaxe')}`);
+    } catch (_) {}
+  }, 15000));
+
+  mainLoop();
+
+  return {
+    stop() {
+      state.stopped = true;
+      for (const t of timers) clearInterval(t);
+    },
+  };
+}
+
+module.exports = { startBrain };
